@@ -1,0 +1,31 @@
+{
+  "title": "向快乐出发",
+  "style": "Joyful uplifting pop with bright synths, energetic rhythms and warm harmonious vocals",
+  "lyrics": "[verse]\n晨光落在微笑的脸庞\n新的一天充满新希望\n我们迎着风自由歌唱\n每一步都有温暖方向\n把梦想装进行囊\n和伙伴分享每道光\n勇敢推开那扇窗\n世界回应热烈的掌声\n[chorus]\n手牵手向快乐出发\n让幸福开满每个春夏\n笑声穿过白云和晚霞\n心中有爱就不会害怕\n手牵手向未来出发\n让美好在此刻发芽\n我们一起大声歌唱\n把欢乐送到千万家",
+  "sections": [
+    {
+      "label": "verse",
+      "start_line": 1,
+      "end_line": 9,
+      "visual": {
+        "primary_shape": "particles",
+        "palette": ["#FFD166", "#63E6BE"],
+        "motion_intensity": 0.5,
+        "camera_behavior": "slow_orbit"
+      }
+    },
+    {
+      "label": "chorus",
+      "start_line": 10,
+      "end_line": 18,
+      "visual": {
+        "primary_shape": "torus",
+        "palette": ["#FF7A59", "#FFE45E", "#65C7FF"],
+        "motion_intensity": 0.9,
+        "camera_behavior": "zoom_in"
+      }
+    }
+  ],
+  "_lang": "zh",
+  "_model": "qwen3:8b"
+}

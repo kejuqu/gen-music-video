@@ -1,0 +1,4 @@
+ollama>=0.4.0
+requests>=2.31.0
+# Used by audio_analysis.py and its tests. Blender 4.2+ bundles NumPy already.
+numpy>=1.26.0
