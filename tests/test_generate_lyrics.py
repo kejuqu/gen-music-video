@@ -74,6 +74,65 @@ class LyricsTests(unittest.TestCase):
 
     @patch("scripts.generate_lyrics.time.sleep")
     @patch("scripts.generate_lyrics.ollama.chat")
+    def test_main_normalizes_common_chinese_model_output(self, chat, _sleep):
+        data = copy.deepcopy(self.data)
+        data["lyrics"] = data["lyrics"].replace("[verse]", "[主歌 1]").replace("[chorus]", "[副歌 1]")
+        data["sections"][0]["visual"]["motion_intensity"] = 5
+        data["sections"][1]["visual"]["motion_intensity"] = 9
+        chat.return_value = {"message": {"content": json.dumps(data, ensure_ascii=False)}}
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "lyrics.json"
+            with patch("sys.argv", ["generate_lyrics.py", "--output", str(output)]):
+                generate_lyrics.main()
+            written = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertIn("[verse]\n", written["lyrics"])
+        self.assertIn("[chorus]\n", written["lyrics"])
+        self.assertNotIn("主歌 1", written["lyrics"])
+        self.assertEqual(written["sections"][0]["visual"]["motion_intensity"], 0.5)
+        self.assertEqual(written["sections"][1]["visual"]["motion_intensity"], 0.9)
+
+    @patch("scripts.generate_lyrics.time.sleep")
+    @patch("scripts.generate_lyrics.ollama.chat")
+    def test_main_retries_when_english_model_returns_chinese_lyrics(self, chat, _sleep):
+        english_data = copy.deepcopy(self.data)
+        english_data["title"] = "Brighter Days"
+        english_data["lyrics"] = """[verse]
+Morning light is calling us
+Every step is full of hope
+We can chase the sun together
+Every road leads us back home
+Raise your hands and sing it out
+Let the whole world hear our song
+We are stronger side by side
+This is where we both belong
+[chorus]
+We are running toward the light
+Hearts are shining through the night
+Every dream is coming true
+All I need is here with you
+We are running toward the light
+Hearts are shining through the night
+Every dream is coming true
+All I need is here with you"""
+        chat.side_effect = [
+            {"message": {"content": json.dumps(self.data, ensure_ascii=False)}},
+            {"message": {"content": json.dumps(english_data)}},
+        ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "lyrics.json"
+            with patch("sys.argv", ["generate_lyrics.py", "--output", str(output), "--lang", "en"]):
+                generate_lyrics.main()
+            written = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(written["_lang"], "en")
+        self.assertEqual(written["title"], "Brighter Days")
+        self.assertEqual(chat.call_count, 2)
+
+    @patch("scripts.generate_lyrics.time.sleep")
+    @patch("scripts.generate_lyrics.ollama.chat")
     def test_main_retries_malformed_json(self, chat, _sleep):
         chat.side_effect = [
             {"message": {"content": "not json"}},

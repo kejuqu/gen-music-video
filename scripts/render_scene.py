@@ -26,6 +26,9 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from audio_analysis import load_audio  # noqa: E402
+from cinematic_visuals import (  # noqa: E402
+    add_ribbons_and_dust, add_stage, animate_sculpture, create_sculpture, surface_material,
+)
 
 FPS = 24
 WIDTH = 1080
@@ -41,6 +44,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--analysis-wav", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--samples", type=int, default=int(os.environ.get("RENDER_SAMPLES", "64")))
+    parser.add_argument("--preview-seconds", type=float, help="Render only the opening seconds")
+    parser.add_argument("--resolution-percentage", type=int, default=100)
+    parser.add_argument("--still-frame", type=int, help="Render one frame to a PNG instead of video")
     return parser.parse_args(argv[argv.index("--") + 1 :])
 
 
@@ -54,7 +60,10 @@ def hex_to_rgba(value: str, alpha: float = 1.0) -> tuple[float, float, float, fl
         red, green, blue = (int(value[index : index + 2], 16) / 255 for index in (0, 2, 4))
     except ValueError as error:
         raise ValueError(f"invalid hex color: {value}") from error
-    return red, green, blue, alpha
+    # Palette values are sRGB; shader sockets expect scene-linear values.
+    def linear(channel):
+        return channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+    return linear(red), linear(green), linear(blue), alpha
 
 
 def emissive_mat(name: str, color: tuple[float, float, float, float], strength: float = 4.0):
@@ -72,45 +81,7 @@ def emissive_mat(name: str, color: tuple[float, float, float, float], strength: 
 
 
 def create_shape(shape: str, material, location: tuple[float, float, float]):
-    if shape == "particles":
-        # Reliable baseline: an ico sphere + wireframe. Geometry Nodes can replace
-        # this branch later without changing the JSON contract.
-        bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=2, radius=0.8, location=location)
-        obj = bpy.context.object
-        modifier = obj.modifiers.new("Wire", "WIREFRAME")
-        modifier.thickness = 0.02
-    elif shape == "crystal":
-        bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=1, radius=1.0, location=location)
-        obj = bpy.context.object
-    elif shape == "torus":
-        bpy.ops.mesh.primitive_torus_add(location=location, major_radius=1.0, minor_radius=0.3)
-        obj = bpy.context.object
-    elif shape == "fluid_metaball":
-        metaball = bpy.data.metaballs.new("Meta")
-        metaball.resolution = 0.2
-        obj = bpy.data.objects.new("MetaObj", metaball)
-        bpy.context.collection.objects.link(obj)
-        element = metaball.elements.new()
-        element.radius = 1.2
-        obj.location = location
-    elif shape == "wireframe_grid":
-        bpy.ops.mesh.primitive_grid_add(
-            x_subdivisions=20,
-            y_subdivisions=20,
-            size=4.0,
-            location=location,
-        )
-        obj = bpy.context.object
-        modifier = obj.modifiers.new("Wire", "WIREFRAME")
-        modifier.thickness = 0.03
-    else:
-        raise ValueError(f"unsupported primary_shape: {shape}")
-
-    obj.data.materials.append(material)
-    if obj.type == "MESH":
-        for polygon in obj.data.polygons:
-            polygon.use_smooth = shape != "crystal"
-    return obj
+    return create_sculpture(shape, material, location)
 
 
 def section_ranges(sections: list[dict[str, Any]], frames: int) -> list[tuple[int, int]]:
@@ -126,40 +97,11 @@ def section_ranges(sections: list[dict[str, Any]], frames: int) -> list[tuple[in
 
 
 def add_atmosphere(data: dict[str, Any], analysis: dict[str, Any]) -> None:
-    """Layer fine orbital rings and a deterministic field of luminous motes."""
-    frames = analysis["frames"]
+    """Frame the sculpture with flowing light trails, depth and gentle bloom."""
     palette = data["sections"][0]["visual"]["palette"]
-    accent = emissive_mat("Orbit gold", hex_to_rgba(palette[1]), 2.0)
-    for index in range(3):
-        bpy.ops.mesh.primitive_torus_add(major_radius=1.8 + index * 0.35,
-                                       minor_radius=0.012, major_segments=96, minor_segments=8)
-        ring = bpy.context.object
-        ring.data.materials.append(accent)
-        for frame in range(frames):
-            pulse = float(analysis["pulse"][frame])
-            scale = 1 + 0.09 * pulse
-            ring.scale = (scale,) * 3
-            ring.rotation_euler = (0.4 + index * 0.6, frame / FPS * 0.09, index + frame / FPS * 0.04)
-            ring.keyframe_insert("scale", frame=frame)
-            ring.keyframe_insert("rotation_euler", frame=frame)
-    dust = emissive_mat("Stardust", hex_to_rgba(palette[-1]), 1.5)
-    root = bpy.data.objects.new("Star field", None)
-    bpy.context.collection.objects.link(root)
-    rng = np.random.default_rng(42)
-    for _ in range(100):
-        direction = rng.normal(size=3)
-        direction /= np.linalg.norm(direction)
-        position = direction * rng.uniform(3.0, 7.0)
-        bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=1, radius=float(rng.uniform(0.008, 0.025)), location=position)
-        star = bpy.context.object
-        star.parent = root
-        star.data.materials.append(dust)
-    strength = dust.node_tree.nodes["Emission"].inputs["Strength"]
-    for frame in range(frames):
-        root.rotation_euler = (0, 0, frame / FPS * 0.012)
-        root.keyframe_insert("rotation_euler", frame=frame)
-        strength.default_value = 1.2 + 1.5 * float(analysis["high"][frame])
-        strength.keyframe_insert("default_value", frame=frame)
+    accent = emissive_mat("Ribbon accent", hex_to_rgba(palette[1]), 1.8)
+    dust = emissive_mat("Floating pollen", hex_to_rgba(palette[-1]), 1.2)
+    add_ribbons_and_dust(analysis, FPS, accent, dust)
     scene = bpy.context.scene
     # Blender 5 uses a compositor node group; Blender 4 uses scene.node_tree.
     scene.use_nodes = True
@@ -177,9 +119,15 @@ def add_atmosphere(data: dict[str, Any], analysis: dict[str, Any]) -> None:
     if "Type" in glow.inputs:
         glow.inputs["Type"].default_value = "Fog Glow"
         glow.inputs["Quality"].default_value = "High"
+        if "Threshold" in glow.inputs:
+            glow.inputs["Threshold"].default_value = 1.5
+        if "Strength" in glow.inputs:
+            glow.inputs["Strength"].default_value = 0.25
     else:
         glow.glare_type = "FOG_GLOW"
         glow.quality = "HIGH"
+        glow.threshold = 1.5
+        glow.mix = -0.85
     tree.links.new(source.outputs["Image"], glow.inputs["Image"])
     tree.links.new(glow.outputs["Image"], output.inputs["Image"])
 
@@ -196,9 +144,11 @@ def build_scene(data: dict[str, Any], analysis: dict[str, Any], samples: int) ->
     world = bpy.data.worlds.new("World")
     world.use_nodes = True
     background = world.node_tree.nodes["Background"]
-    background.inputs["Color"].default_value = (0.004, 0.004, 0.008, 1)
-    background.inputs["Strength"].default_value = 1.0
+    background.inputs["Color"].default_value = (0.055, 0.085, 0.12, 1)
+    background.inputs["Strength"].default_value = 0.45
     scene.world = world
+    scene.view_settings.view_transform = "AgX"
+    add_stage()
 
     sections = data["sections"]
     ranges = section_ranges(sections, frames)
@@ -206,9 +156,11 @@ def build_scene(data: dict[str, Any], analysis: dict[str, Any], samples: int) ->
     for index, (section, (start, end)) in enumerate(zip(sections, ranges)):
         visual = section["visual"]
         palette = visual["palette"]
-        material = emissive_mat(f"Section_{index}", hex_to_rgba(palette[0]))
+        material = surface_material(f"Section_{index}", hex_to_rgba(palette[0]),
+                                    hex_to_rgba(palette[1]))
         obj = create_shape(visual["primary_shape"], material, (0, 0, 0))
-        emission = material.node_tree.nodes["Emission"].inputs["Strength"]
+        obj.name = f"Hero {index}: {visual['primary_shape']}"
+        emission = material.node_tree.nodes["Principled BSDF"].inputs["Emission Strength"]
         intensity = float(visual["motion_intensity"])
         transition = min(FPS, max(2, (end - start + 1) // 4))
         start = max(0, start - transition)
@@ -221,6 +173,7 @@ def build_scene(data: dict[str, Any], analysis: dict[str, Any], samples: int) ->
             fade_in = min(1.0, local / transition)
             fade_out = min(1.0, remaining / transition)
             base = max(0.0, min(fade_in, fade_out))
+            base = base * base * (3 - 2 * base)
 
             low = float(analysis["low"][frame])
             mid = float(analysis["mid"][frame])
@@ -228,18 +181,21 @@ def build_scene(data: dict[str, Any], analysis: dict[str, Any], samples: int) ->
             rms = float(analysis["rms"][frame])
             pulse = float(analysis["pulse"][frame])
             energy = (0.35 * low + 0.25 * mid + 0.15 * rms + 0.25 * pulse) * intensity
-            scale = base * (0.6 + 0.8 * energy)
+            scale = base * (0.95 + 0.22 * energy)
 
             obj.scale = (scale, scale, scale)
             obj.keyframe_insert("scale", frame=frame)
-            emission.default_value = base * (2.0 + 4.0 * energy + 3.0 * high * intensity)
+            obj.location.z = 0.12 * math.sin(frame / FPS * 0.9 + index) + 0.08 * energy
+            obj.keyframe_insert("location", frame=frame)
+            animate_sculpture(obj, frame / FPS, energy, frame)
+            emission.default_value = base * (0.025 + 0.09 * energy + 0.04 * high * intensity)
             emission.keyframe_insert("default_value", frame=frame)
 
             if frame % 4 == 0 or frame == end:
                 obj.rotation_euler = (
-                    mid * intensity * 0.35,
-                    local / FPS * 0.25 * intensity,
-                    local / FPS * 0.3 * (0.5 + intensity),
+                    0.4 + 0.12 * math.sin(frame / FPS * 0.35) + mid * intensity * 0.08,
+                    local / FPS * 0.12 * intensity,
+                    local / FPS * 0.16 * (0.5 + intensity),
                 )
                 obj.keyframe_insert("rotation_euler", frame=frame)
 
@@ -259,18 +215,24 @@ def build_scene(data: dict[str, Any], analysis: dict[str, Any], samples: int) ->
     constraint.track_axis = "TRACK_NEGATIVE_Z"
     constraint.up_axis = "UP_Y"
 
-    camera_data.lens = 38
-    radius, height = 10.5, 3.5
-    camera_frames = sorted(set(range(0, frames, 4)) | {frames - 1})
-    for frame in camera_frames:
-        theta = frame / FPS * 0.035
-        # Continuous orbit/dolly avoids jumps when visual sections change.
-        current_radius = radius + 0.5 * math.sin(frame / FPS * 0.08)
-        camera.location = (
-            current_radius * math.cos(theta),
-            current_radius * math.sin(theta),
-            height + 0.3 * math.sin(frame / FPS * 0.06),
-        )
+    camera_data.lens = 43
+    camera_data.dof.use_dof = True
+    camera_data.dof.focus_object = target
+    camera_data.dof.aperture_fstop = 4.0
+    camera_data.dof.aperture_blades = 7
+    # Integrate camera velocity so a new section never resets its position.
+    theta, radius, velocity = -0.7, 11.5, 0.0
+    for frame in range(frames):
+        section_index = min(len(sections) - 1, frame * len(sections) // frames)
+        behavior = sections[section_index]["visual"].get("camera_behavior", "slow_orbit")
+        desired = 0.035 if behavior == "slow_orbit" else 0.0
+        velocity += (desired - velocity) * 0.035
+        theta += velocity / FPS
+        desired_radius = 10.6 if behavior == "zoom_in" else 11.5
+        radius += (desired_radius - radius) * 0.008
+        shake = (0.025 * float(analysis["pulse"][frame])) if behavior == "shake" else 0
+        camera.location = (radius * math.cos(theta), radius * math.sin(theta),
+                           2.6 + shake * math.sin(frame * 1.7))
         camera.keyframe_insert("location", frame=frame)
 
     add_atmosphere(data, analysis)
@@ -289,6 +251,11 @@ def build_scene(data: dict[str, Any], analysis: dict[str, Any], samples: int) ->
         raise RuntimeError(f"EEVEE is unavailable; render engines: {sorted(engine_ids)}")
     if hasattr(scene, "eevee") and hasattr(scene.eevee, "taa_render_samples"):
         scene.eevee.taa_render_samples = samples
+    if hasattr(scene, "eevee") and hasattr(scene.eevee, "use_raytracing"):
+        scene.eevee.use_raytracing = True
+    if hasattr(scene.render, "use_motion_blur"):
+        scene.render.use_motion_blur = True
+        scene.render.motion_blur_shutter = 0.3
 
     # Blender 5.x splits image/video output into media_type first; 4.x does not.
     if hasattr(scene.render.image_settings, "media_type"):
@@ -322,21 +289,41 @@ def main() -> None:
     if args.samples < 1:
         raise SystemExit("--samples must be positive")
 
+    if not 1 <= args.resolution_percentage <= 100:
+        raise SystemExit("--resolution-percentage must be between 1 and 100")
+    if args.preview_seconds is not None and (not math.isfinite(args.preview_seconds) or args.preview_seconds <= 0):
+        raise SystemExit("--preview-seconds must be positive and finite")
+
     with args.lyrics_json.open(encoding="utf-8") as handle:
         data = json.load(handle)
     analysis = load_audio(args.analysis_wav, FPS)
+    if args.still_frame is not None and not 0 <= args.still_frame < analysis["frames"]:
+        raise SystemExit("--still-frame must be within the audio timeline")
+    if args.still_frame is not None and args.output.suffix.lower() != ".png":
+        raise SystemExit("--still-frame requires a .png output")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     # Never let a stale video from an earlier run masquerade as this render.
     args.output.unlink(missing_ok=True)
 
     build_scene(data, analysis, args.samples)
     scene = bpy.context.scene
+    scene.render.resolution_percentage = args.resolution_percentage
+    # Preserve full-song section timing when previewing just the opening.
+    if args.preview_seconds is not None:
+        scene.frame_end = min(scene.frame_end, max(0, math.ceil(args.preview_seconds * FPS) - 1))
     scene.render.filepath = str(args.output.resolve())
 
     started_at = time.time()
-    bpy.ops.render.render(animation=True)
+    if args.still_frame is not None:
+        if hasattr(scene.render.image_settings, "media_type"):
+            scene.render.image_settings.media_type = "IMAGE"
+        scene.render.image_settings.file_format = "PNG"
+        scene.frame_set(args.still_frame)
+        bpy.ops.render.render(write_still=True)
+    else:
+        bpy.ops.render.render(animation=True)
     resolve_rendered_output(args.output, started_at)
-    print(f"OK silent video -> {args.output}")
+    print(f"OK render -> {args.output}")
 
 
 if __name__ == "__main__":

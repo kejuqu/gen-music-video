@@ -102,23 +102,59 @@ palette 使用 2–4 个明亮、温暖或清新的十六进制颜色码，motio
 每个 section 的 start_line 和 end_line 必须是有效的歌词行范围，且 end_line 不小于 start_line。
 camera_behavior 从枚举中选。style 字段必须是一句英文音乐风格描述，明确包含 joyful、uplifting
 或其他积极情绪关键词，用于音频生成模型。只返回符合 JSON Schema 的 JSON，不要 Markdown 或解释。""",
-    "en": """Write song lyrics in English about {theme}.
-The mood must be positive, uplifting, happy and joyful, celebrating hope, courage, togetherness
-and love of life. Make the chorus bright and memorable. Avoid sadness, darkness, loneliness,
-loss or hopelessness. The lyrics field must contain the complete song, never just the title or a summary.
-Write a complete 180-second (3-minute) song with 32 content lines: [verse] 8 lines,
-[chorus] 8 lines, [verse] 8 lines, [chorus] 8 lines. Describe a short intro,
-instrumental interludes and a natural outro in style.
-For each section produce visual instructions: choose primary_shape from the enum,
-use 2–4 bright, warm or fresh hexadecimal colors for palette, and let motion_intensity rise
-with the joyful emotional arc. start_line and end_line must describe a valid lyric-line range,
-with end_line >= start_line. Choose camera_behavior from the enum. The style field must be a
-one-line English music style description with explicit joyful/uplifting mood keywords for the
-audio model. Return only JSON matching the JSON Schema, without Markdown or explanations.""",
+    "en": """Write an original song in English about {theme}.
+The mood must be positive, uplifting, happy and joyful, celebrating hope, courage and togetherness.
+The lyrics field must contain ONLY English song lyrics and section markers, never visual settings.
+Use exactly 32 lyric lines in this order: [verse], 8 lyric lines, [chorus], 8 lyric lines,
+[verse], 8 lyric lines, [chorus], 8 lyric lines. Do not write Chinese or translate the lyrics.
+The style field must be one English line describing joyful uplifting music, a short intro,
+instrumental interludes and a natural outro. Keep style separate from lyrics.
+Create one visual section for each of the four lyric sections. Choose primary_shape and
+camera_behavior from the schema enums, use 2–4 hex colors, and keep motion_intensity between 0 and 1.
+start_line and end_line must identify valid lines in the lyrics string, including section markers.
+Return only JSON matching the JSON Schema, without Markdown or explanations.""",
 }
 
 
-def validate_lyrics(data: Any) -> dict[str, Any]:
+CJK_CHARACTER = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
+SECTION_MARKER = re.compile(
+    r"^\s*[\[【]?\s*(verse|chorus|主歌|副歌)(?:\s*\d+)?\s*[:：]?\s*[\]】]?\s*[:：]?\s*$",
+    re.IGNORECASE,
+)
+CANONICAL_SECTION_NAMES = {"verse": "verse", "chorus": "chorus", "主歌": "verse", "副歌": "chorus"}
+
+
+def normalize_lyrics(data: Any) -> Any:
+    """Normalize common, unambiguous formatting deviations from small local models."""
+    if not isinstance(data, dict):
+        return data
+
+    lyrics = data.get("lyrics")
+    if isinstance(lyrics, str):
+        lines = []
+        for line in lyrics.splitlines():
+            marker = SECTION_MARKER.fullmatch(line)
+            if marker:
+                name = CANONICAL_SECTION_NAMES[marker.group(1).lower()]
+                lines.append(f"[{name}]")
+            else:
+                lines.append(line)
+        data["lyrics"] = "\n".join(lines)
+
+    sections = data.get("sections")
+    if isinstance(sections, list):
+        for section in sections:
+            if not isinstance(section, dict) or not isinstance(section.get("visual"), dict):
+                continue
+            visual = section["visual"]
+            intensity = visual.get("motion_intensity")
+            if isinstance(intensity, (int, float)) and not isinstance(intensity, bool) and 1 < intensity <= 10:
+                visual["motion_intensity"] = intensity / 10
+
+    return data
+
+
+def validate_lyrics(data: Any, lang: str | None = None) -> dict[str, Any]:
     """Validate fields that the renderer and music generator rely on."""
     if not isinstance(data, dict):
         raise ValueError("model response must be a JSON object")
@@ -126,6 +162,10 @@ def validate_lyrics(data: Any) -> dict[str, Any]:
     for key in ("title", "style", "lyrics"):
         if not isinstance(data.get(key), str) or not data[key].strip():
             raise ValueError(f"{key} must be a non-empty string")
+    if lang == "en" and CJK_CHARACTER.search(data["lyrics"]):
+        raise ValueError("English lyrics must not contain Chinese characters")
+    if lang == "zh" and not CJK_CHARACTER.search(data["lyrics"]):
+        raise ValueError("Chinese lyrics must contain Chinese characters")
     if not any(keyword in data["style"].lower() for keyword in POSITIVE_STYLE_KEYWORDS):
         raise ValueError("style must explicitly describe a positive, happy or uplifting mood")
 
@@ -246,7 +286,7 @@ def main() -> None:
             # Preserve the model reply for diagnosis if validation fails.
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.with_suffix(".raw.txt").write_text(content, encoding="utf-8")
-            data = validate_lyrics(json.loads(content))
+            data = validate_lyrics(normalize_lyrics(json.loads(content)), lang=lang)
             data["_lang"] = lang
             data["_model"] = model
             write_json_atomic(args.output, data)
