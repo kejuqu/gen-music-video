@@ -1,26 +1,27 @@
-# 每日抽象音乐视频自动生成系统
+# 每日音乐视频自动生成系统
 
-一个面向 macOS / Apple Silicon 的本地音乐视频流水线：每天依次生成中文、英文两条 **9:16 抽象音乐视频**，并通过 `launchd` 定时无人值守运行。
+一个面向 macOS / Apple Silicon 的本地音乐视频流水线：每天按 **zh → en 排队**生成中文、英文两条 **3 分钟**歌曲，并为每条歌曲输出 **16:9 横版**和 **9:16 竖版**两个带卡拉 OK 歌词的音乐视频（外加 MP3），可通过 `launchd` 定时无人值守运行。
 
-系统使用 Ollama 生成歌词和结构化视觉指令，使用 YoVoice / ACE-Step 生成歌曲，使用 ffmpeg 标准化音频，使用 NumPy 分析音频能量，最后由 Blender EEVEE 渲染画面并合成为 MP4。默认创作方向为**阳光、希望、成长、幸福与欢乐**：歌词和音乐风格必须积极向上、幸福欢乐，视觉默认明亮温暖。
+系统使用 Ollama 生成歌词和结构化视觉指令，使用 YoVoice / ACE-Step 生成歌曲，视频由项目自研的 Python 渲染器（`render_visualizer.py`）逐帧合成：旋转黑胶唱片 + 彩虹环形频谱 + 逐词时间轴对齐的底部歌词，最后由 ffmpeg 混入音轨。默认创作方向为**阳光、希望、成长、幸福与欢乐**：歌词和音乐风格必须积极向上、幸福欢乐，视觉默认明亮温暖。
 
-> **验证边界**：本 README 提供完整部署与验证步骤，不代表当前环境已经实际完成模型下载、歌曲生成或 Blender 渲染。首次部署必须按[首次手动验证](#首次手动验证)逐项检查，确认中英两条链路均可用后再启用定时任务。
+> **验证边界**：本 README 提供完整部署与验证步骤，不代表当前环境已经实际完成模型下载或歌曲生成。首次部署必须按[首次手动验证](#首次手动验证)逐项检查，确认中英两条链路均可用后再启用定时任务。
 
 ## 三分钟音乐与节奏视觉
 
-歌曲固定请求 **180 秒**，使用 YoVoice 的 `modelOptions.ace_step.duration_seconds=180`（[官方选项目录](https://github.com/leemysw/yovoice/blob/main/internal/catalog/generation_options.json)）。生成后通过 ffprobe 检查实际时长：偏差超过 1 秒即报错；仅修正 1 秒以内的模型取整误差，输出精确 180 秒 PCM WAV，并添加自然淡出。不会循环短歌曲凑时长。运行环境需要 ffmpeg 和 ffprobe。
+歌曲默认请求 **180 秒**（3 分钟），使用 YoVoice 的 `modelOptions.ace_step.duration_seconds=180`。可用环境变量 `MUSIC_DURATION` 或 `generate_music.py --duration` 覆盖（例如调试时设 `MUSIC_DURATION=30`）。生成后通过 ffprobe 检查实际时长：偏差超过 1 秒即报错；仅修正 1 秒以内的模型取整误差，输出精确时长的 PCM WAV，并添加自然淡出。不会循环短歌曲凑时长。运行环境需要 ffmpeg 和 ffprobe。
 
-歌词按三分钟编排生成两轮主歌、副歌。视频保持 1080×1920、24 fps（180 秒共 4320 帧），增加三层细光环、空间粒子、柔和辉光、重叠转场和连续运镜。真实音频的频谱起音驱动光环脉冲，低中频控制主体，高频控制粒子亮度；这不是人声逐字对齐，段落视觉仍按时间均分。最终 MP4 使用 AAC 256k 和 faststart。
+视频画面由真实音频逐帧驱动：128 根 3px 彩虹频谱条（色相按角度排布并随时间缓慢漂移）围绕中央黑胶唱片（封面图作唱片标签，按真实唱机 **33⅓ RPM** 旋转），条高经对数增益映射频谱能量，背后是模糊封面背景、能量辉光和暗角。歌词由 **mlx-whisper 单词级时间戳**与歌词文本做字符级全局对齐得到逐句时间轴，随演唱在底部显示（中文按字、英文按词自动换行，最多两行；纯器乐间奏自动清屏；单句最长显示 15 秒）。
 
 修改生成逻辑不会改变已有产物，需要重新运行流水线生成新作品。
 
 ## 功能特性
 
-- **每日双语产出**：默认按 `zh`、`en` 顺序串行执行，中文路由到 `qwen3:8b`，英文路由到 `llama3.1:8b`。
+- **每日双语排队产出**：默认按 `zh`、`en` 顺序串行执行（单条失败不阻塞另一条），中文路由到 `qwen3:8b`，英文路由到 `llama3.1:8b`。
+- **双比例成片**：每首歌曲同时输出 1280×720（16:9）和 720×1280（9:16，适配 TikTok / Reels / Shorts）两个 MP4，外加同名 MP3。
 - **积极快乐的结构化创作**：Ollama 使用 JSON Schema 约束标题、英文风格描述、歌词及每段视觉参数；默认歌词与音乐风格积极向上、幸福欢乐，失败时自动重试。
-- **本地音乐生成**：通过 YoVoice HTTP 服务调用 `ace-step-1.5-q8`，歌词语言与目录语言保持一致。
-- **音频驱动画面**：ffmpeg 输出 16-bit PCM、单声道、44.1 kHz 分析音频；NumPy 提取 RMS 与低、中、高频能量。
-- **明亮温暖的抽象 3D 视觉**：Blender 根据段落配置创建粒子、晶体、圆环、流体元球或线框网格，以明亮温暖的默认配色驱动缩放、发光和摄像机运动。
+- **本地音乐生成**：通过 YoVoice HTTP 服务调用 ACE-Step 模型，歌词语言与目录语言保持一致。
+- **卡拉 OK 歌词**：本地 mlx-whisper（Apple Silicon 优化，模型约 1.5 GB，首次转写自动下载）生成单词级时间戳，与歌词做字符级对齐；幻觉段落自动跳过，稀疏转写自动回退整段匹配。
+- **音频驱动画面**：visgen 的 `AudioProcessor` 做逐帧 FFT 频谱分析；对数增益映射让弱频段也有细节，能量驱动辉光呼吸。
 - **可靠的无人值守编排**：单条失败不会阻止另一条执行；全部结束后以非零退出码汇总失败。
 - **便于排查**：按日期保存日志和中间产物，可单独重跑任一语言，也可配置中间文件保留天数。
 
@@ -31,24 +32,30 @@ launchd / 手动执行
         │
         ▼
 Ollama（zh → qwen3:8b，en → llama3.1:8b）
-        │  lyrics.json：歌词 + style + sections 视觉指令
+        │  lyrics.json：歌词 + style + sections 视觉指令（palette 用于封面与配色）
         ▼
 YoVoice serve（ACE-Step）
-        │  song.wav
+        │  song.wav（默认 180 秒）
         ▼
-ffmpeg 标准化
-        │  analysis.wav：PCM s16 / mono / 44100 Hz
-        ▼
-NumPy 音频分析 + Blender 4.2+ EEVEE Next
-        │  silent_video.mp4
-        ▼
-ffmpeg 合流（视频流复制，音频编码为 AAC）
+ffmpeg 导出 MP3
         │
         ▼
-<安全化的歌词标题>_YYYY-MM-DD.mp4
+render_visualizer.py（每个语言跑两次）
+  ├─ mlx-whisper 歌词对齐 → timing.json（首次渲染时生成并缓存）
+  ├─ 程序化生成封面 → cover.png
+  ├─ 逐帧合成：黑胶唱片 + 彩虹频谱 + 底部歌词（无声）
+  └─ h264 编码（优先 videotoolbox 硬件编码）
+        │  silent_16x9.mp4 / silent_9x16.mp4
+        ▼
+ffmpeg 合流（视频流直接复制 + AAC 192k 音轨）
+        │
+        ▼
+<安全化的歌词标题>_YYYY-MM-DD.mp4      ← 16:9
+<安全化的歌词标题>_YYYY-MM-DD_9x16.mp4 ← 9:16
+<安全化的歌词标题>_YYYY-MM-DD.mp3
 ```
 
-音频分析和音视频合流不放在 Blender 内完成，可以避免无头模式下 Graph Editor 上下文和 VSE 状态带来的不稳定。每个阶段都可独立执行和重试。
+每个阶段都可独立执行和重试。同一语言内 16:9 与 9:16 共用 `timing.json` 和 `cover.png`，只渲染画面两遍。
 
 ## 目录结构
 
@@ -70,10 +77,15 @@ ffmpeg 合流（视频流复制，音频编码为 AAC）
 │   ├── .env                     # 本地配置，由模板复制（自行创建）
 │   ├── daily_pipeline.sh        # 每日串行编排、服务探测、日志与清理
 │   ├── generate_lyrics.py       # Ollama 歌词及视觉指令生成
-│   ├── generate_music.py        # YoVoice 歌曲生成与音频下载
-│   ├── audio_analysis.py        # PCM 音频读取及逐帧 FFT 分析
-│   ├── render_scene.py          # Blender 无头场景构建与渲染
-│   └── install_launchd.sh       # 渲染并加载 launchd 配置
+│   ├── generate_music.py        # YoVoice 歌曲生成与音频下载（--duration 可改时长）
+│   ├── lyric_timing.py          # mlx-whisper 歌词时间轴（单词级对齐）
+│   ├── render_visualizer.py     # 视频渲染：黑胶 + 彩虹频谱 + 歌词（--aspect 16:9/9:16）
+│   ├── video_filename.py        # 最终文件名安全化
+│   ├── install_launchd.sh       # 渲染并加载 launchd 配置
+│   ├── audio_analysis.py        # 【旧流程】PCM 音频读取及逐帧 FFT 分析
+│   ├── cinematic_visuals.py     # 【旧流程】Blender 场景模块，当前管线不再调用
+│   ├── render_scene.py          # 【旧流程】Blender 无头渲染，当前管线不再调用
+│   └── render_audioglow.py      # 【旧流程】audioglow 渲染，当前管线不再调用
 ├── launchd/
 │   └── com.local.musicvideo.daily.plist.template
 ├── tests/                       # 离线单元测试
@@ -88,25 +100,31 @@ ffmpeg 合流（视频流复制，音频编码为 AAC）
     ├── zh/
     │   ├── lyrics.json
     │   ├── song.wav
-    │   ├── analysis.wav         # 中间产物
-    │   ├── silent_video.mp4     # 中间产物
-    │   └── 向阳而生_2026-11-10.mp4  # 最终视频：安全化标题_日期
+    │   ├── timing.json          # 每句歌词的起止时间（渲染时缓存，可删了重算）
+    │   ├── cover.png            # 程序化生成的专辑封面
+    │   ├── silent_16x9.mp4      # 中间产物（无声）
+    │   ├── silent_9x16.mp4      # 中间产物（无声）
+    │   ├── 向阳而生_2026-11-10.mp4        # 最终视频：安全化标题_日期（16:9，带音轨）
+    │   ├── 向阳而生_2026-11-10_9x16.mp4   # 最终视频（9:16，带音轨）
+    │   └── 向阳而生_2026-11-10.mp3        # 最终音频
     └── en/
         └── ...
 ```
 
-最终视频命名为 `<安全化的歌词title>_YYYY-MM-DD.mp4`。标题中的中文会保留，空白转为下划线，非法文件名字符替换为下划线。例如：
+最终视频命名为 `<安全化的歌词title>_YYYY-MM-DD.mp4`（竖版追加 `_9x16`）。标题中的中文会保留，空白转为下划线，非法文件名字符替换为下划线。例如：
 
 ```text
 ~/Desktop/music-video/2026-11-10/zh/向阳而生_2026-11-10.mp4
+~/Desktop/music-video/2026-11-10/zh/向阳而生_2026-11-10_9x16.mp4
 ~/Desktop/music-video/2026-11-10/en/Sunshine_and_Joy_2026-11-10.mp4
+~/Desktop/music-video/2026-11-10/en/Sunshine_and_Joy_2026-11-10_9x16.mp4
 ```
 
 `YYYY-MM-DD` 是本次任务的 `DATE`，不是文件修改时间。
 
 ## 依赖已准备好时的快速启动
 
-以下命令假定已执行 `uv sync --dev`，已配置 `scripts/.env`，Ollama、YoVoice 和 Blender 均可用：
+以下命令假定已执行 `uv sync --dev`，已配置 `scripts/.env`，Ollama 和 YoVoice 均可用：
 
 ```bash
 cd "$HOME/Desktop/music-video"
@@ -119,16 +137,15 @@ LANGS='zh en' bash scripts/daily_pipeline.sh
 tail -f "$HOME/Desktop/music-video/_logs/$(date +%F).log"
 ```
 
-两种语言均显示 `OK` 后，用实际标题生成的日期后缀找到并打开最终视频：
+两种语言均显示 `OK` 后，打开当天全部成片：
 
 ```bash
 DATE_STAMP="$(date +%F)"
 DAY="$HOME/Desktop/music-video/$DATE_STAMP"
 find "$DAY/zh" "$DAY/en" -maxdepth 1 -type f \
-  -name "*_${DATE_STAMP}.mp4" -exec open {} +
+  \( -name "*_${DATE_STAMP}.mp4" -o -name "*_${DATE_STAMP}_9x16.mp4" -o -name "*_${DATE_STAMP}.mp3" \) \
+  -exec open {} +
 ```
-
-该命令会打开当天两个语言目录中所有符合后缀的最终视频；若保留了同日的旧标题产物，也会一并打开。
 
 如果使用了自定义 `MUSIC_VIDEO_ROOT` 或 `DATE`，请将上述路径替换为对应目录。快速启动只是运行入口，不代表真实生成已经验证成功。
 
@@ -138,10 +155,9 @@ find "$DAY/zh" "$DAY/en" -maxdepth 1 -type f \
 - **uv 0.11.12**，作为主依赖管理工具；项目使用 **Python 3.12**，`.python-version` 已固定为 `3.12`，`pyproject.toml` 要求至少 Python 3.10。
 - Ollama，以及 `qwen3:8b`、`llama3.1:8b` 两个模型。
 - 可访问的 YoVoice 服务和 ACE-Step 模型；仅首次准备模型或需要脚本自动拉起服务时才需要 YoVoice macOS arm64 CLI。
-- ffmpeg。
-- Blender 4.2 或更新版本，使用 EEVEE Next。
+- ffmpeg（含 ffprobe）。视频渲染不需要 Blender、不需要 GPU OpenGL 环境。
 
-> 8B 语言模型、ACE-Step 和 Blender 都会占用较多统一内存。生成期间不要同时运行其他大型模型或高内存任务。
+> 8B 语言模型、ACE-Step 和 mlx-whisper 都会占用较多统一内存。生成期间不要同时运行其他大型模型或高内存任务。mlx-whisper 的模型文件（约 1.5 GB）在首次歌词对齐时自动下载到 Hugging Face 缓存。
 
 ## 安装
 
@@ -176,12 +192,12 @@ uv sync --dev            # 读取 .python-version，自动创建 .venv
 
 uv python find 3.12
 .venv/bin/python3 --version
-uv run --no-sync python -c 'import sys, ollama, requests, numpy; print(sys.version); print("dependencies OK")'
+uv run --no-sync python -c 'import sys, ollama, requests, numpy, visgen, mlx_whisper; print(sys.version); print("dependencies OK")'
 ```
 
-预期项目解释器为 **CPython 3.12.x**。不要使用系统 `/usr/bin/python3` 的 3.9 运行本项目。Blender 使用其自身内置的 Python，与 uv 的 `.venv` 是两套独立环境。
+预期项目解释器为 **CPython 3.12.x**。不要使用系统 `/usr/bin/python3` 的 3.9 运行本项目。
 
-`uv sync --dev` 根据 `pyproject.toml` 创建 `.venv`，并同时安装运行和测试依赖；存在 `uv.lock` 时按锁文件同步。日常 Python 命令使用 `uv run ...`，无需先激活虚拟环境。`requirements.txt` 和 `requirements-dev.txt` 只为非 uv 用户保留兼容路径，不是本项目的推荐主路径。
+`uv sync --dev` 根据 `pyproject.toml` 创建 `.venv`，并同时安装运行和测试依赖（含 `visgen`、`mlx-whisper`，渲染器还需要 Pillow / NumPy / OpenCV，均由依赖自动带入）。`requirements.txt` 和 `requirements-dev.txt` 只为非 uv 用户保留兼容路径，不是本项目的推荐主路径。
 
 非 uv 用户可自行创建虚拟环境，并使用 pip 安装 `requirements-dev.txt`（其中包含运行依赖）；只运行生产流水线而不跑测试时也可安装 `requirements.txt`。
 
@@ -264,17 +280,14 @@ yovoice serve \
   --listen 127.0.0.1:8080
 ```
 
-### 5. 安装 ffmpeg 和 Blender
+### 5. 安装 ffmpeg
 
 ```bash
 brew install ffmpeg
-brew install --cask blender
-
 ffmpeg -version
-/Applications/Blender.app/Contents/MacOS/Blender --version
 ```
 
-若 Blender 不在默认位置，通过 `BLENDER` 配置其可执行文件绝对路径。
+视频渲染和歌词对齐都依赖 ffmpeg；不需要安装 Blender。
 
 ## 配置
 
@@ -295,7 +308,7 @@ PYTHON=/Users/YOURNAME/Desktop/music-video/.venv/bin/python3
 修改后验证解释器及依赖：
 
 ```bash
-"$HOME/Desktop/music-video/.venv/bin/python3" -c 'import ollama, requests'
+"$HOME/Desktop/music-video/.venv/bin/python3" -c 'import ollama, requests, visgen, mlx_whisper'
 ```
 
 文件中的路径必须是**展开后的绝对路径**，不要使用 `~` 或 `$HOME`。完整条目以 `config/pipeline.env.example` 为准。
@@ -305,28 +318,28 @@ PYTHON=/Users/YOURNAME/Desktop/music-video/.venv/bin/python3
 | `MUSIC_VIDEO_ROOT` | `/Users/YOURNAME/Desktop/music-video` | 项目数据、日志和每日产物根目录 |
 | `PYTHON` | `/Users/YOURNAME/Desktop/music-video/.venv/bin/python3` | 执行 Python 脚本的解释器；launchd 必须配置此项 |
 | `LANGS` | `zh en` | 语言及串行顺序，只支持 `zh`、`en`；调试可设为 `zh` |
+| `MUSIC_DURATION` | `180` | 歌曲时长（秒）；调试可设为 `30` |
 | `THEME` | 各语言内置的“阳光、希望、成长、幸福与欢乐”主题 | 可选，覆盖歌词主题；默认内容必须积极向上、幸福欢乐 |
 | `DATE` | 当天 `YYYY-MM-DD` | 可选，指定补跑日期 |
 | `YOVOICE_HOST` / `YOVOICE_PORT` | `127.0.0.1` / `8080` | YoVoice 监听地址和端口 |
 | `YOVOICE_API_BASE` | 由 host/port 推导 | 可选，显式覆盖完整 API 地址 |
 | `YOVOICE_DATA_DIR` | `$MUSIC_VIDEO_ROOT/.yovoice-data` | YoVoice 模型与数据目录 |
 | `YOVOICE_TOKEN_FILE` | `$MUSIC_VIDEO_ROOT/.yovoice-token` | Bearer Token 文件路径 |
-| `YOVOICE_MODEL_ID` | `ace-step-1.5-q8` | 歌曲模型 |
-| `BLENDER` | `/Applications/Blender.app/Contents/MacOS/Blender` | Blender 可执行文件 |
+| `YOVOICE_MODEL_ID` | 自动选择已安装的 ACE-Step 模型 | 可选，显式指定歌曲模型 |
 | `RETENTION_DAYS` | 默认不清理，模板示例为 `3` | 可选，清理超过指定天数的分析 WAV 和无声视频 |
 | `NOTIFY_FAILURE` | `0` | 设为 `1` 时尝试发送 macOS 失败通知 |
 
 `scripts/.env` 提供默认值，命令前显式传入的环境变量优先级更高，例如 `LANGS=zh bash scripts/daily_pipeline.sh` 会覆盖文件中的 `LANGS`。日常调试既可修改配置文件，也可使用命令前缀临时覆盖：
 
 ```bash
-THEME='阳光、友谊与一起成长的快乐' LANGS='zh' bash scripts/daily_pipeline.sh
+THEME='阳光、友谊与一起成长的快乐' LANGS='zh' MUSIC_DURATION=30 bash scripts/daily_pipeline.sh
 ```
 
 直接分步调用 Python 脚本不会自动读取此文件，需要先 `source scripts/.env` 或自行导出相关变量。
 
 ## 首次手动验证
 
-首次部署不要直接交给 launchd。按 **Ollama → YoVoice → ffmpeg → 音频分析 → Blender → 合流** 的顺序验证，再运行完整流水线。
+首次部署不要直接交给 launchd。按 **Ollama → YoVoice → ffmpeg → 歌词对齐 → 渲染 → 合流** 的顺序验证，再运行完整流水线。
 
 以下命令假定：
 
@@ -369,80 +382,81 @@ curl -f -H "Authorization: Bearer $(cat "$MUSIC_VIDEO_ROOT/.yovoice-token")" \
   http://127.0.0.1:8080/v1/status
 ```
 
-然后生成歌曲：
+然后生成 30 秒短歌做快速验证（完整流水线默认 180 秒）：
 
 ```bash
 uv run python scripts/generate_music.py \
   --lyrics "$TEST_OUT/lyrics.json" \
-  --output "$TEST_OUT/song.wav"
+  --output "$TEST_OUT/song.wav" \
+  --duration 30
 ffprobe -v error -show_streams -show_format "$TEST_OUT/song.wav"
 ```
 
 若使用非默认地址，确保 `YOVOICE_API_BASE` 或 `YOVOICE_HOST` / `YOVOICE_PORT` 与健康检查地址一致。带歌词的音乐必须使用 ACE-Step / YuE2 一类支持歌曲生成的模型，不要改用只生成纯音乐的 Stable Audio。
 
-### 3. 验证音频标准化与分析
+### 3. 验证歌词时间轴（mlx-whisper）
 
 ```bash
-ffmpeg -y -loglevel error -i "$TEST_OUT/song.wav" \
-  -ac 1 -ar 44100 -sample_fmt s16 "$TEST_OUT/analysis.wav"
-ffprobe -v error -show_entries \
-  stream=codec_name,sample_rate,channels,bits_per_sample \
-  -of default=noprint_wrappers=1 "$TEST_OUT/analysis.wav"
-```
-
-预期为 PCM 16-bit、44100 Hz、单声道。`audio_analysis.py` 由渲染脚本调用；需要单独诊断其参数时运行：
-
-```bash
-uv run python scripts/audio_analysis.py --help
-```
-
-若 `uv run` 提示缺少 NumPy，先重新执行 `uv sync --dev`。Blender 使用其自带的 Python 运行渲染脚本；如果只有 Blender 调用时报依赖错误，应单独检查该环境中的 NumPy 是否可用。
-
-### 4. 验证 Blender 无头渲染
-
-```bash
-"${BLENDER:-/Applications/Blender.app/Contents/MacOS/Blender}" \
-  --background --factory-startup -noaudio \
-  --python-exit-code 1 \
-  --python "$MUSIC_VIDEO_ROOT/scripts/render_scene.py" -- \
+uv run python scripts/lyric_timing.py \
+  --song "$TEST_OUT/song.wav" \
   --lyrics-json "$TEST_OUT/lyrics.json" \
-  --analysis-wav "$TEST_OUT/analysis.wav" \
-  --output "$TEST_OUT/silent_video.mp4"
-
-test -s "$TEST_OUT/silent_video.mp4"
+  --output "$TEST_OUT/timing.json"
 ```
 
-`--python-exit-code 1` 不可省略，否则 Blender 遇到 Python 异常时仍可能返回成功。渲染结束后还要确认文件存在且非空。
+首次运行会自动下载 whisper 模型（约 1.5 GB）。检查 `timing.json`：每句 `start`/`end` 应在合理范围（单句 2–10 秒），且整体随时间递增。`[verse]` 等段落标记不会出现在字幕里。
+
+### 4. 验证视频渲染（无声）
+
+```bash
+uv run python scripts/render_visualizer.py \
+  --lyrics-json "$TEST_OUT/lyrics.json" \
+  --song-wav "$TEST_OUT/song.wav" \
+  --output "$TEST_OUT/silent_16x9.mp4" \
+  --aspect 16:9
+
+uv run python scripts/render_visualizer.py \
+  --lyrics-json "$TEST_OUT/lyrics.json" \
+  --song-wav "$TEST_OUT/song.wav" \
+  --output "$TEST_OUT/silent_9x16.mp4" \
+  --aspect 9:16
+
+test -s "$TEST_OUT/silent_16x9.mp4" && test -s "$TEST_OUT/silent_9x16.mp4"
+```
+
+渲染会复用已生成的 `timing.json` 和 `cover.png`；删除它们可强制重新对齐/重新生成封面。检查画面：黑胶唱片持续旋转、彩虹频谱随音乐跳动、底部歌词与演唱同步。
 
 ### 5. 验证音视频合流
-
-将 `lyrics.json` 的 `title` 按上述规则安全化，再作为最终文件名前缀。例如标题为“向阳而生”时：
 
 ```bash
 SAFE_TITLE='向阳而生'  # 替换为实际 title 的安全化结果
 FINAL_VIDEO="$TEST_OUT/${SAFE_TITLE}_$(date +%F).mp4"
+FINAL_VIDEO_9X16="$TEST_OUT/${SAFE_TITLE}_$(date +%F)_9x16.mp4"
 ffmpeg -y -loglevel error \
-  -i "$TEST_OUT/silent_video.mp4" -i "$TEST_OUT/song.wav" \
-  -c:v copy -c:a aac -b:a 192k -shortest \
+  -i "$TEST_OUT/silent_16x9.mp4" -i "$TEST_OUT/song.wav" \
+  -c:v copy -c:a aac -b:a 192k -shortest -movflags +faststart \
   "$FINAL_VIDEO"
+ffmpeg -y -loglevel error \
+  -i "$TEST_OUT/silent_9x16.mp4" -i "$TEST_OUT/song.wav" \
+  -c:v copy -c:a aac -b:a 192k -shortest -movflags +faststart \
+  "$FINAL_VIDEO_9X16"
 
-test -s "$FINAL_VIDEO"
-ffprobe -v error -show_streams -show_format "$FINAL_VIDEO"
+test -s "$FINAL_VIDEO" && test -s "$FINAL_VIDEO_9X16"
+ffprobe -v error -show_entries stream=codec_type -of csv=p=0 "$FINAL_VIDEO"
 ```
 
-打开视频抽查：有声、画面随节奏变化、竖屏比例为 9:16，且歌曲语言与目录一致。
+预期每个文件都输出 `video` 和 `audio` 两行。打开视频抽查：有声、画面随节奏变化、横竖两个比例、歌词与演唱同步，且歌曲语言与目录一致。
 
 ### 6. 验证完整编排
 
 分别验证中文和英文，再验证默认双语言任务：
 
 ```bash
-LANGS='zh' bash scripts/daily_pipeline.sh
-LANGS='en' bash scripts/daily_pipeline.sh
+LANGS='zh' MUSIC_DURATION=30 bash scripts/daily_pipeline.sh
+LANGS='en' MUSIC_DURATION=30 bash scripts/daily_pipeline.sh
 bash scripts/daily_pipeline.sh
 ```
 
-确认两个目录中都有 `lyrics.json`、`song.wav` 和 `<安全化标题>_<DATE>.mp4`。两条任务应串行执行；若第一条失败，第二条仍应尝试，日志末尾通过 `fail=1` 和非零退出码汇总失败。
+确认两个目录中都有 `lyrics.json`、`song.wav`、两个最终 MP4 和一个 MP3。两条任务应串行执行；若第一条失败，第二条仍应尝试，日志末尾通过 `fail=1` 和非零退出码汇总失败。
 
 补跑指定日期：
 
@@ -530,7 +544,7 @@ tail -n 100 "$MUSIC_VIDEO_ROOT/_logs/launchd.out"
 tail -n 100 "$MUSIC_VIDEO_ROOT/_logs/launchd.err"
 ```
 
-每种语言应以 `OK` 结束；失败时会记录 `FAILED`，整个脚本最终以非零状态退出。`RETENTION_DAYS` 控制旧分析音频和无声视频的自动清理，原始歌曲、最终 MP4、歌词及日志不会因该设置被当作中间文件删除。清理前仍建议先备份重要产物。
+每种语言应以 `OK` 结束；失败时会记录 `FAILED`，整个脚本最终以非零状态退出。`RETENTION_DAYS` 控制旧分析音频和无声视频的自动清理，原始歌曲、最终 MP4/MP3、歌词及日志不会因该设置被当作中间文件删除。清理前仍建议先备份重要产物。
 
 ## 测试
 
@@ -543,14 +557,14 @@ uv run python -m unittest discover -s tests -v
 # 或者：uv run pytest -q
 ```
 
-`requirements-dev.txt` 仅供非 uv 用户通过 pip 安装同一组开发依赖。这里仅提供测试命令，不声称当前仓库的测试已经通过。
+`requirements-dev.txt` 仅供非 uv 用户通过 pip 安装同一组开发依赖。
 
-单元测试覆盖歌词数据校验、音乐请求构造和音频分析等离线逻辑，不会替代以下真实集成验证：
+单元测试覆盖歌词数据校验、音乐请求构造、时长校验、文件名安全化和歌词对齐（换行、幻觉跳过、显示上限）等离线逻辑，不会替代以下真实集成验证：
 
 - Ollama 模型可下载并能按 Schema 返回内容；
 - YoVoice 可启动、鉴权、生成并返回音频；
-- Blender 可在本机 Metal/EEVEE 环境无头渲染；
-- ffmpeg 合流后的 MP4 可正常播放且音视频同步。
+- mlx-whisper 首次可下载模型并完成转写；
+- 渲染器可调用 ffmpeg 编码，合流后的 MP4 有声音且音视频同步。
 
 ## 常见问题
 
@@ -584,24 +598,34 @@ yovoice models list --data-dir "$MUSIC_VIDEO_ROOT/.yovoice-data"
 
 - 健康检查失败：确认端口、服务进程和 `--data-dir`。
 - 401/403：确认 Token 文件非空、权限为 `600`，且与服务配置使用同一 Token。
-- 模型不存在：重新下载 `ace-step-1.5-q8`。
+- 模型不存在：重新下载 ACE-Step 模型。
 - 中文发音异常：检查 `lyrics.json` 的 `_lang`，不要手动让歌词语言与 `language` 参数不一致。
 
-### `analysis.wav` 无法读取
+### 歌词对不上或某句停留太久
 
-重新执行标准化命令，并确认是 16-bit PCM，而不是 24-bit、float 或压缩 WAV。分析器需要可读的非空音频；0 字节文件和损坏下载不能被当作成功。
+`timing.json` 是渲染时缓存的。修正对齐逻辑或换歌后，删除对应语言目录下的 `timing.json` 再重跑，强制重新转写对齐。若某句长期识别不到（哼唱、含糊），该句会按前一句结束时间插入；整段缺失时回退整段匹配。单句显示最长 15 秒，之后自动清屏等待下一句。
 
-### Blender 返回异常或 MP4 为空
+### 渲染报错或 MP4 为空
 
-检查调用中是否包含 `--background --factory-startup -noaudio --python-exit-code 1`，并确认 `BLENDER` 指向真实可执行文件。查看当日日志中的 Python traceback；仅看到 Blender 进程返回还不够，必须执行 `test -s silent_video.mp4`。
+渲染器要求 ffmpeg 在 `PATH` 中（优先使用 `h264_videotoolbox` 硬件编码，缺失时回退 `libx264`）。查看当日日志中渲染阶段的 Python traceback；不仅要看进程返回码，还要确认 `test -s silent_16x9.mp4` 非空。不要在渲染的同时跑其他大内存任务。
+
+### 视频没有声音
+
+渲染阶段产出的是无声视频（`silent_*.mp4`），最终音轨由合流阶段添加。若最终 MP4 没有音轨，检查合流阶段日志，并手动验证：
+
+```bash
+ffprobe -v error -show_entries stream=codec_type -of csv=p=0 <最终视频>
+```
+
+预期输出 `video` 和 `audio` 两行。
 
 ### 视频时长或声音异常
 
-最终合流使用 `-shortest`，视频与音频以较短者为准。若画面提前结束，先检查分析 WAV 和无声视频时长，再检查 Blender 帧数、帧率和音频采样信息：
+最终合流使用 `-shortest`，视频与音频以较短者为准。若画面提前结束，先检查无声视频和歌曲时长：
 
 ```bash
-# 在待检查的 zh/ 或 en/ 产物目录中执行；日期后缀匹配最终标题视频。
-for file in song.wav analysis.wav silent_video.mp4 ./*_????-??-??.mp4; do
+# 在待检查的 zh/ 或 en/ 产物目录中执行
+for file in song.wav silent_16x9.mp4 silent_9x16.mp4 ./*_????-??-??.mp4; do
   [ -f "$file" ] || continue
   printf '%s: ' "$file"
   ffprobe -v error -show_entries format=duration \
@@ -609,32 +633,34 @@ for file in song.wav analysis.wav silent_video.mp4 ./*_????-??-??.mp4; do
 done
 ```
 
-### 内存不足、渲染极慢或机器卡顿
+### 内存不足、生成极慢或机器卡顿
 
-不要并行运行两条流水线。关闭其他大模型、渲染任务和高内存应用；保留一个 YoVoice 服务和一个 Blender 实例。需要进一步降低负载时，可减少场景复杂度、渲染采样或粒子数量，但不要未经测试同时修改分辨率和渲染后端。
+不要并行运行两条流水线。关闭其他大模型、渲染任务和高内存应用；保留一个 YoVoice 服务实例。歌词对齐（mlx-whisper）和渲染（逐帧合成）会竞争统一内存，但渲染本身已使用硬件编码，3 分钟双比例成片通常在 1–2 分钟内完成。
 
 ## 资源与运行时间参考
 
-在 M4 Pro / 24 GB 的目标环境中，需求估算如下，实际时间随歌曲长度、模型、场景复杂度和系统负载变化：
+在 M4 Pro / 24 GB 的目标环境中，需求估算如下，实际时间随歌曲长度、模型、系统负载变化：
 
-| 阶段 | 单条估算 | 两条合计 |
-| --- | ---: | ---: |
-| Ollama 歌词与视觉 JSON | 30–60 秒 | 1–2 分钟 |
-| YoVoice ACE-Step 歌曲 | 3–8 分钟 | 6–16 分钟 |
-| ffmpeg 标准化 | 少于 5 秒 | 少于 10 秒 |
-| Blender 1080×1920 / 24 fps 渲染 | 4–10 分钟 | 8–20 分钟 |
-| ffmpeg 合流 | 少于 10 秒 | 少于 20 秒 |
-| **总计** | — | **约 15–40 分钟** |
+| 阶段 | 单语言估算 |
+| --- | ---: |
+| Ollama 歌词与视觉 JSON | 30–60 秒 |
+| YoVoice ACE-Step 歌曲（180 秒） | 3–8 分钟 |
+| ffmpeg 导出 MP3 | 少于 5 秒 |
+| mlx-whisper 歌词对齐（首次含模型下载） | 10–60 秒（下载约 1–3 分钟） |
+| 渲染 16:9 + 9:16（硬件编码） | 1–2 分钟 |
+| ffmpeg 合流 × 2 | 少于 20 秒 |
+| **单语言总计** | **约 5–12 分钟** |
+| **双语合计（串行）** | **约 10–25 分钟** |
 
-这些数字不是性能承诺。默认输出为 1080×1920、24 fps；两条任务必须串行，避免 Metal GPU 和统一内存争用。
+这些数字不是性能承诺。两条语言任务必须串行执行，避免统一内存争用。视频输出为 1280×720（16:9）和 720×1280（9:16）、30 fps、h264；不再需要 Blender 渲染阶段。
 
 ## 部署验收清单
 
 - [ ] `ollama list` 中同时存在 `qwen3:8b` 和 `llama3.1:8b`。
 - [ ] YoVoice 健康检查通过，ACE-Step 模型已下载，Token 文件权限为 `600`。
-- [ ] ffmpeg 与 Blender 版本命令正常，Blender 路径与配置一致。
+- [ ] ffmpeg 版本命令正常，`PYTHON` 指向项目 `.venv`，`visgen` / `mlx_whisper` 可导入。
 - [ ] 中文手动流水线成功，英文手动流水线成功。
-- [ ] 两个最终 MP4 均非空，有声音，画面随节奏变化，比例为 9:16。
+- [ ] 每种语言的 16:9 和 9:16 最终 MP4 均非空、有声音、画面随节奏变化、歌词与演唱同步，比例正确。
 - [ ] `lyrics.json` 的语言、模型元字段、YoVoice 发音语言和输出目录一致。
 - [ ] 已执行 `uv sync --dev`，运行 `uv run python -m unittest discover -s tests -v` 或 `uv run pytest -q`，并处理所有失败。
 - [ ] plist 通过 `plutil -lint`，launchd 中能看到任务。
@@ -642,3 +668,4 @@ done
 - [ ] 已确认定时任务的 `PATH`、Python 绝对路径、根目录和 Token 路径不依赖当前终端。
 
 完成以上检查后，再将系统视为可无人值守运行。
+

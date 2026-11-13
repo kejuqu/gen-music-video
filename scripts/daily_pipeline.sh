@@ -26,9 +26,9 @@ if [ -z "${PYTHON:-}" ]; then
   fi
 fi
 export PYTHONUNBUFFERED=1
-BLENDER="${BLENDER:-/Applications/Blender.app/Contents/MacOS/Blender}"
 LANGS="${LANGS:-zh en}"
 THEME="${THEME:-}"
+DURATION="${MUSIC_DURATION:-180}"
 RETENTION_DAYS="${RETENTION_DAYS:-}"
 NOTIFY_FAILURE="${NOTIFY_FAILURE:-0}"
 YOVOICE_HOST="${YOVOICE_HOST:-127.0.0.1}"
@@ -64,12 +64,12 @@ for COMMAND in "$PYTHON" curl ffmpeg ffprobe ollama; do
     exit 1
   fi
 done
-if ! command -v "$BLENDER" >/dev/null 2>&1; then
-  echo "FATAL: Blender not found: $BLENDER"
-  exit 1
-fi
 if ! "$PYTHON" -c 'import ollama, requests' >/dev/null 2>&1; then
   echo "FATAL: Python dependencies missing; install requirements.txt for $PYTHON"
+  exit 1
+fi
+if ! "$PYTHON" -c 'import visgen, mlx_whisper' >/dev/null 2>&1; then
+  echo "FATAL: visgen/mlx-whisper missing; install requirements.txt for $PYTHON"
   exit 1
 fi
 if ! ollama list >/dev/null 2>&1; then
@@ -168,30 +168,42 @@ for LANG in "${LANG_LIST[@]}"; do
 
   # Remove stale stage outputs so an old file can never mask a failed rerun.
   rm -f "$OUT/lyrics.json" "$OUT/song.wav" "$OUT/analysis.wav" \
-    "$OUT/silent_video.mp4"
+    "$OUT/silent_video.mp4" "$OUT/silent_16x9.mp4" "$OUT/silent_9x16.mp4" \
+    "$OUT/timing.json" "$OUT/cover.png"
 
-  if LYRICS_LANG="$LANG" THEME="$THEME" run_stage "1/5 Lyrics (Ollama)" "$PYTHON" "$SCRIPT_DIR/generate_lyrics.py" \
+  if LYRICS_LANG="$LANG" THEME="$THEME" run_stage "1/6 Lyrics (Ollama)" "$PYTHON" "$SCRIPT_DIR/generate_lyrics.py" \
         --output "$OUT/lyrics.json" \
      && FINAL_VIDEO="$OUT/$("$PYTHON" "$SCRIPT_DIR/video_filename.py" \
         --lyrics "$OUT/lyrics.json" --date "$DATE")" \
-     && rm -f "$FINAL_VIDEO" \
-     && run_stage "2/5 Music (YoVoice, 180 seconds)" "$PYTHON" "$SCRIPT_DIR/generate_music.py" \
+     && FINAL_VIDEO_9X16="${FINAL_VIDEO%.mp4}_9x16.mp4" \
+     && FINAL_MP3="${FINAL_VIDEO%.mp4}.mp3" \
+     && rm -f "$FINAL_VIDEO" "$FINAL_VIDEO_9X16" "$FINAL_MP3" \
+     && run_stage "2/6 Music (YoVoice, $DURATION seconds)" "$PYTHON" "$SCRIPT_DIR/generate_music.py" \
         --lyrics "$OUT/lyrics.json" \
         --output "$OUT/song.wav" \
-     && run_stage "3/5 Audio analysis preparation" ffmpeg -y -loglevel error -i "$OUT/song.wav" \
-        -ac 1 -ar 44100 -sample_fmt s16 "$OUT/analysis.wav" \
-     && run_stage "4/5 Video rendering (4320 frames)" "$BLENDER" \
-        --background --factory-startup -noaudio \
-        --python-exit-code 1 \
-        --python "$SCRIPT_DIR/render_scene.py" -- \
+        --duration "$DURATION" \
+     && run_stage "3/6 MP3 export" ffmpeg \
+        -i "$OUT/song.wav" -c:a libmp3lame -q:a 2 -y \
+        "$FINAL_MP3" \
+     && run_stage "4/6 Video rendering (vinyl + rainbow spectrum, 16:9, silent)" "$PYTHON" "$SCRIPT_DIR/render_visualizer.py" \
         --lyrics-json "$OUT/lyrics.json" \
-        --analysis-wav "$OUT/analysis.wav" \
-        --output "$OUT/silent_video.mp4" \
-     && run_stage "5/5 MP4 assembly" ffmpeg -y -loglevel error \
-        -i "$OUT/silent_video.mp4" -i "$OUT/song.wav" \
-        -c:v copy -c:a aac -b:a 256k -t 180 -shortest -movflags +faststart \
+        --song-wav "$OUT/song.wav" \
+        --output "$OUT/silent_16x9.mp4" \
+        --aspect 16:9 \
+     && run_stage "5/6 Video rendering (vinyl + rainbow spectrum, 9:16, silent)" "$PYTHON" "$SCRIPT_DIR/render_visualizer.py" \
+        --lyrics-json "$OUT/lyrics.json" \
+        --song-wav "$OUT/song.wav" \
+        --output "$OUT/silent_9x16.mp4" \
+        --aspect 9:16 \
+     && run_stage "6/6 Mux audio into MP4s" ffmpeg -y -loglevel error \
+        -i "$OUT/silent_16x9.mp4" -i "$OUT/song.wav" \
+        -c:v copy -c:a aac -b:a 192k -shortest -movflags +faststart \
         "$FINAL_VIDEO" \
-     && [ -s "$FINAL_VIDEO" ]; then
+     && run_stage "6/6 Mux audio into MP4s" ffmpeg -y -loglevel error \
+        -i "$OUT/silent_9x16.mp4" -i "$OUT/song.wav" \
+        -c:v copy -c:a aac -b:a 192k -shortest -movflags +faststart \
+        "$FINAL_VIDEO_9X16" \
+     && [ -s "$FINAL_VIDEO" ] && [ -s "$FINAL_VIDEO_9X16" ] && [ -s "$FINAL_MP3" ]; then
     echo "--- [$LANG] OK $(date +%T) -> $FINAL_VIDEO ---"
   else
     echo "--- [$LANG] FAILED $(date +%T) ---"

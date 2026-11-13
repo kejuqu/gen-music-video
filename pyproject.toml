@@ -8,6 +8,8 @@ dependencies = [
     "ollama>=0.4.0",
     "requests>=2.31.0",
     "numpy>=1.26.0",
+    "visgen>=0.2.0",
+    "mlx-whisper>=0.4.0",
 ]
 
 [dependency-groups]

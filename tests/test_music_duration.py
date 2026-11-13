@@ -23,13 +23,13 @@ class DurationTests(unittest.TestCase):
             path = Path(directory) / 'song.wav'
             path.write_bytes(b'existing')
             with self.assertRaisesRegex(ValueError, 'expected 180-second'):
-                write_wav_atomic(path, self.audio(30))
+                write_wav_atomic(path, self.audio(30), target_duration=180)
             self.assertEqual(path.read_bytes(), b'existing')
             self.assertEqual(list(path.parent.iterdir()), [path])
 
     def test_rounding_corrected_to_exactly_180_seconds(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'song.wav'
-            write_wav_atomic(path, self.audio(179.8))
+            write_wav_atomic(path, self.audio(179.8), target_duration=180)
             with wave.open(str(path)) as stream:
                 self.assertEqual(stream.getnframes(), 180 * stream.getframerate())

@@ -246,6 +246,24 @@ def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def write_lyrics_text_atomic(path: Path, lyrics: str) -> None:
+    """Write plain lyrics without structural markers or visual metadata."""
+    lines = []
+    for line in lyrics.splitlines():
+        if line.strip().startswith("[") and line.strip().endswith("]"):
+            line = ""
+        if not line.strip() and (not lines or not lines[-1].strip()):
+            continue
+        lines.append(line)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        temporary.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
@@ -290,6 +308,7 @@ def main() -> None:
             data["_lang"] = lang
             data["_model"] = model
             write_json_atomic(args.output, data)
+            write_lyrics_text_atomic(args.output.with_suffix(".txt"), data["lyrics"])
             print(f"OK {model} -> {args.output}")
             return
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:

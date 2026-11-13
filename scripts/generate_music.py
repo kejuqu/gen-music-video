@@ -14,7 +14,7 @@ from typing import Any
 import requests
 
 DEFAULT_MODEL_ID = "ace-step-1.5-turbo-q8"
-TARGET_DURATION = 180
+DEFAULT_DURATION = int(os.environ.get("MUSIC_DURATION", "180"))
 PREFERRED_MODEL_IDS = (
     "ace-step-1.5-turbo-q8",
     "ace-step-1.5-q8",  # Compatibility with older YoVoice catalogs.
@@ -48,7 +48,7 @@ def load_token() -> str:
     return token
 
 
-def build_payload(data: dict[str, Any]) -> dict[str, Any]:
+def build_payload(data: dict[str, Any], duration: int = DEFAULT_DURATION) -> dict[str, Any]:
     lang = data.get("_lang")
     if lang not in ("zh", "en"):
         raise ValueError("lyrics.json must contain _lang set to 'zh' or 'en'")
@@ -60,7 +60,7 @@ def build_payload(data: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "kind": "music",
-        "modelOptions": {"ace_step": {"duration_seconds": TARGET_DURATION}},
+        "modelOptions": {"ace_step": {"duration_seconds": duration}},
         "text": style,
         "lyrics": lyrics,
         "instrumental": False,
@@ -148,7 +148,7 @@ def is_wav(content: bytes) -> bool:
     return len(content) > 44 and content[:4] in (b"RIFF", b"RF64") and content[8:12] == b"WAVE"
 
 
-def write_wav_atomic(path: Path, content: bytes) -> None:
+def write_wav_atomic(path: Path, content: bytes, target_duration: int) -> None:
     if not is_wav(content):
         raise ValueError(f"YoVoice returned {len(content)} bytes, but not a valid WAV audio stream")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -161,12 +161,13 @@ def write_wav_atomic(path: Path, content: bytes) -> None:
             "-of", "default=noprint_wrappers=1:nokey=1", str(temporary),
         ], check=True, capture_output=True, text=True)
         duration = float(probe.stdout.strip())
-        if not math.isfinite(duration) or abs(duration - TARGET_DURATION) > 1:
-            raise ValueError(f"expected 180-second music, received {duration:.3f}s; regenerate with duration support")
+        if not math.isfinite(duration) or abs(duration - target_duration) > 1:
+            raise ValueError(f"expected {target_duration}-second music, received {duration:.3f}s; regenerate with duration support")
         # Correct only sub-second model rounding, without looping a short song.
+        fade_start = max(target_duration - 2, 0)
         subprocess.run([
             "ffmpeg", "-y", "-v", "error", "-i", str(temporary),
-            "-af", "apad,atrim=duration=180,afade=t=in:d=0.05,afade=t=out:st=178:d=2",
+            "-af", f"apad,atrim=duration={target_duration},afade=t=in:d=0.05,afade=t=out:st={fade_start}:d=2",
             "-ar", "44100", "-c:a", "pcm_s16le", str(mastered),
         ], check=True)
         mastered.replace(path)
@@ -179,6 +180,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lyrics", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--duration",
+        type=int,
+        default=DEFAULT_DURATION,
+        help="Song length in seconds (default: MUSIC_DURATION env or 180).",
+    )
     return parser.parse_args()
 
 
@@ -187,7 +194,7 @@ def main() -> None:
     try:
         with args.lyrics.open(encoding="utf-8") as handle:
             data = json.load(handle)
-        payload = build_payload(data)
+        payload = build_payload(data, duration=args.duration)
         headers = {"Authorization": f"Bearer {load_token()}"}
         base = api_base()
         payload["modelId"] = resolve_model_id(base, headers, payload["modelId"])
@@ -214,7 +221,7 @@ def main() -> None:
             raise_for_status(audio, "YoVoice audio download")
             audio_content = audio.content
 
-        write_wav_atomic(args.output, audio_content)
+        write_wav_atomic(args.output, audio_content, target_duration=args.duration)
         print(f"OK wav -> {args.output}")
     except (OSError, ValueError, KeyError, json.JSONDecodeError, requests.RequestException, subprocess.SubprocessError) as error:
         raise SystemExit(f"music generation failed: {error}") from error

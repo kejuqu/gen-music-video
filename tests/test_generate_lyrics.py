@@ -72,6 +72,35 @@ class LyricsTests(unittest.TestCase):
         self.assertIs(chat.call_args.kwargs["think"], False)
         self.assertIs(chat.call_args.kwargs["format"], generate_lyrics.SCHEMA)
 
+    @patch("scripts.generate_lyrics.ollama.chat")
+    def test_main_writes_plain_text_lyrics_with_blank_line_separators(self, chat):
+        chat.return_value = {"message": {"content": json.dumps(self.data)}}
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "nested" / "lyrics.json"
+            with patch("sys.argv", ["generate_lyrics.py", "--output", str(output)]):
+                generate_lyrics.main()
+            lyric_text = output.with_suffix(".txt").read_text(encoding="utf-8")
+
+        self.assertEqual(lyric_text, """晨光落在微笑的脸庞
+新的一天充满新希望
+我们迎着风自由歌唱
+每一步都有温暖方向
+把梦想装进行囊
+和伙伴分享每道光
+勇敢推开那扇窗
+世界回应热烈的掌声
+
+手牵手向快乐出发
+让幸福开满每个春夏
+笑声穿过白云和晚霞
+心中有爱就不会害怕
+手牵手向未来出发
+让美好在此刻发芽
+我们一起大声歌唱
+把欢乐送到千万家
+""")
+
     @patch("scripts.generate_lyrics.time.sleep")
     @patch("scripts.generate_lyrics.ollama.chat")
     def test_main_normalizes_common_chinese_model_output(self, chat, _sleep):
