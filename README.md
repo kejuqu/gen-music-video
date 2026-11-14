@@ -19,6 +19,7 @@
 - **每日双语排队产出**：默认按 `zh`、`en` 顺序串行执行（单条失败不阻塞另一条），中文路由到 `qwen3:8b`，英文路由到 `llama3.1:8b`。
 - **双比例成片**：每首歌曲同时输出 1280×720（16:9）和 720×1280（9:16，适配 TikTok / Reels / Shorts）两个 MP4，外加同名 MP3。
 - **积极快乐的结构化创作**：Ollama 使用 JSON Schema 约束标题、英文风格描述、歌词及每段视觉参数；默认歌词与音乐风格积极向上、幸福欢乐，失败时自动重试。
+- **每日内容去重（多样性引擎）**：`scripts/diversity.py` 每次从子主题 × 曲风 × 人声 × 节奏的素材池中随机抽签（自动避开最近 7 天用过的组合），把近期作品的标题与风格作为「禁止重复」清单注入提示词；标题撞名或歌词与历史作品 token 相似度 ≥0.45 会被判定失败并带反馈重试。每次 Ollama 调用使用随机 seed。
 - **本地音乐生成**：通过 YoVoice HTTP 服务调用 ACE-Step 模型，歌词语言与目录语言保持一致。
 - **卡拉 OK 歌词**：本地 mlx-whisper（Apple Silicon 优化，模型约 1.5 GB，首次转写自动下载）生成单词级时间戳，与歌词做字符级对齐；幻觉段落自动跳过，稀疏转写自动回退整段匹配。
 - **音频驱动画面**：visgen 的 `AudioProcessor` 做逐帧 FFT 频谱分析；对数增益映射让弱频段也有细节，能量驱动辉光呼吸。
@@ -32,7 +33,8 @@ launchd / 手动执行
         │
         ▼
 Ollama（zh → qwen3:8b，en → llama3.1:8b）
-        │  lyrics.json：歌词 + style + sections 视觉指令（palette 用于封面与配色）
+        │  diversity.py 抽取子主题/曲风/人声组合，附历史去重清单
+        │  lyrics.json：歌词 + style + sections 视觉指令 + _combo 创作指纹
         ▼
 YoVoice serve（ACE-Step）
         │  song.wav（默认 180 秒）

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -13,6 +14,11 @@ from pathlib import Path
 from typing import Any
 
 import ollama
+
+try:
+    from scripts import diversity
+except ImportError:  # running as a plain script: python3 scripts/generate_lyrics.py
+    import diversity
 
 SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -270,6 +276,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lang", default=os.environ.get("LYRICS_LANG", "zh"), choices=("zh", "en"))
     parser.add_argument("--theme", default=os.environ.get("THEME"))
     parser.add_argument("--attempts", type=int, default=int(os.environ.get("LYRICS_ATTEMPTS", "5")))
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=None,
+        help="project root for diversity history (default: MUSIC_VIDEO_ROOT or derived from --output)",
+    )
     return parser.parse_args()
 
 
@@ -280,8 +292,24 @@ def main() -> None:
 
     lang = args.lang.lower()
     model = MODEL_BY_LANG[lang]
-    theme = args.theme or DEFAULT_THEME[lang]
-    base_prompt = PROMPTS[lang].format(theme=theme)
+    if args.root is not None:
+        root = args.root
+    elif os.environ.get("MUSIC_VIDEO_ROOT"):
+        root = Path(os.environ["MUSIC_VIDEO_ROOT"]).expanduser()
+    else:  # <root>/<date>/<lang>/lyrics.json -> root
+        root = args.output.resolve().parents[2]
+    history = diversity.load_history(root, lang)
+    rng = random.SystemRandom()
+    combo = diversity.pick_combo(lang, history, rng)
+    if args.theme:
+        combo["theme"] = args.theme
+    base_prompt = PROMPTS[lang].format(theme=combo["theme"])
+    base_prompt += diversity.build_prompt_block(lang, combo, history)
+    print(
+        f"Diversity combo: theme={combo['theme']!r} genre={combo['genre']!r} "
+        f"vocal={combo['vocal']!r}; history={len(history)} songs",
+        flush=True,
+    )
     last_error: Exception | None = None
 
     for attempt in range(args.attempts):
@@ -298,15 +326,30 @@ def main() -> None:
                 messages=[{"role": "user", "content": prompt}],
                 format=SCHEMA,
                 think=False,
-                options={"temperature": 0.9 if attempt == 0 else 0.5},
+                options={
+                    "temperature": 0.9 if attempt == 0 else 0.5,
+                    "seed": rng.randrange(0, 2**31),
+                },
             )
             content = response["message"]["content"]
             # Preserve the model reply for diagnosis if validation fails.
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.with_suffix(".raw.txt").write_text(content, encoding="utf-8")
             data = validate_lyrics(normalize_lyrics(json.loads(content)), lang=lang)
+            if not diversity.title_is_unique(data["title"], history):
+                raise ValueError(
+                    f"title '{data['title']}' duplicates a previously generated song; "
+                    "choose a clearly different title"
+                )
+            similarity = diversity.max_lyric_similarity(data["lyrics"], history)
+            if similarity >= diversity.SIMILARITY_THRESHOLD:
+                raise ValueError(
+                    f"lyrics are too similar to a previously generated song "
+                    f"(token similarity {similarity:.2f}); use new imagery and sentence patterns"
+                )
             data["_lang"] = lang
             data["_model"] = model
+            data["_combo"] = combo
             write_json_atomic(args.output, data)
             write_lyrics_text_atomic(args.output.with_suffix(".txt"), data["lyrics"])
             print(f"OK {model} -> {args.output}")
