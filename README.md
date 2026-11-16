@@ -25,6 +25,7 @@
 - **音频驱动画面**：visgen 的 `AudioProcessor` 做逐帧 FFT 频谱分析；对数增益映射让弱频段也有细节，能量驱动辉光呼吸。
 - **可靠的无人值守编排**：单条失败不会阻止另一条执行；全部结束后以非零退出码汇总失败。
 - **便于排查**：按日期保存日志和中间产物，可单独重跑任一语言，也可配置中间文件保留天数。
+- **纯音乐无歌词成片**：`pure-musics/` 目录中的现成 wav 可直接生成无歌词字幕的 16:9 与 9:16 视频（`scripts/pure_videos.sh`），封面使用默认配色并以文件名作为标题，完成后 wav 与 mp4 统一归档到 `outputs-videos/`。
 
 ## 工作流程
 
@@ -131,6 +132,9 @@ ffmpeg 合流（视频流直接复制 + AAC 192k 音轨）
 ```bash
 cd "$HOME/Desktop/music-video"
 LANGS='zh en' bash scripts/daily_pipeline.sh
+
+# 纯音乐无歌词成片：把 wav 放进 pure-musics/ 后执行
+bash scripts/pure_videos.sh   # 或 make pure-videos
 ```
 
 运行时可在另一个终端跟踪日志：
@@ -150,6 +154,41 @@ find "$DAY/zh" "$DAY/en" -maxdepth 1 -type f \
 ```
 
 如果使用了自定义 `MUSIC_VIDEO_ROOT` 或 `DATE`，请将上述路径替换为对应目录。快速启动只是运行入口，不代表真实生成已经验证成功。
+
+## 纯音乐无歌词成片（pure-musics）
+
+将成品 wav 放入 `pure-musics/` 目录后执行：
+
+```bash
+make pure-videos          # 等价于 bash scripts/pure_videos.sh
+```
+
+脚本会为每个 wav 串行完成以下步骤：
+
+```text
+pure-musics/<歌名>.wav
+        │
+        ▼
+render_visualizer.py --no-lyrics（无歌词字幕，跑两遍）
+  ├─ 16:9 无声画面
+  └─ 9:16 无声画面
+        │
+        ▼
+ffmpeg 合流（视频流复制 + AAC 192k 音轨）
+        │
+        ▼
+outputs-videos/<歌名>_16x9.mp4
+outputs-videos/<歌名>_9x16.mp4
+outputs-videos/<歌名>.wav   ← 原 wav 一并归档
+```
+
+要点：
+
+- 无歌词模式不调用 Ollama / YoVoice / mlx-whisper，只依赖 ffmpeg、visgen 与 `render_visualizer.py`；`--lyrics-json` 变为可选，封面用默认配色、标题取 wav 文件名。
+- 渲染中间产物放在 `.pure-work/<歌名>/`（每次运行前清空，避免旧封面串歌），成功后自动删除；失败的歌曲 wav 保留在 `pure-musics/` 供重试。
+- 成功后 wav 与两个 mp4 移入 `outputs-videos/`；已存在的同名成片会被覆盖。
+- 可用环境变量覆盖路径：`PURE_MUSICS_DIR`、`OUTPUT_VIDEOS_DIR`、`PURE_WORK_DIR`、`PYTHON`。
+- 日志写入 `_logs/pure-videos-<日期>.log`。
 
 ## 环境要求
 

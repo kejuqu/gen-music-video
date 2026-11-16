@@ -16,6 +16,11 @@ Supports both 16:9 (landscape, default) and 9:16 (portrait) output.
 Example:
   python scripts/render_visualizer.py --lyrics-json lyrics.json \
       --song-wav song.wav --output video.mp4 [--duration 30] [--aspect 9:16]
+
+Instrumental / pre-made music (no lyrics overlay; cover uses the default
+palette and the wav filename as the title):
+  python scripts/render_visualizer.py --no-lyrics \
+      --song-wav song.wav --output video.mp4 [--aspect 9:16]
 """
 
 from __future__ import annotations
@@ -303,8 +308,9 @@ def draw_lyric(frame: Image.Image, font, lines, starts, t: float, layout: Layout
         cursor_y += h + line_gap
 
 
-def encode_ffmpeg(output: Path, layout: Layout) -> subprocess.Popen:
-    encoder = "h264_videotoolbox" if _has_videotoolbox() else "libx264"
+def encode_ffmpeg(output: Path, layout: Layout,
+                  encoder: str | None = None) -> subprocess.Popen:
+    encoder = "h264_videotoolbox" if _has_videotoolbox() and _videotoolbox_usable() else "libx264"
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
         "-f", "rawvideo", "-pix_fmt", "rgb24",
@@ -316,6 +322,24 @@ def encode_ffmpeg(output: Path, layout: Layout) -> subprocess.Popen:
         str(output),
     ]
     return subprocess.Popen(cmd, stdin=subprocess.PIPE)
+
+
+_VIDEOTOOLBOX_OK: bool | None = None
+
+
+def _videotoolbox_usable() -> bool:
+    """Probe the hardware encoder once per process: h264_videotoolbox can be
+    busy or unsupported, in which case it fails only once frames arrive."""
+    global _VIDEOTOOLBOX_OK
+    if _VIDEOTOOLBOX_OK is None:
+        probe = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+             "-i", "color=c=black:s=64x64:r=30:d=0.1",
+             "-c:v", "h264_videotoolbox", "-f", "null", "-"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        _VIDEOTOOLBOX_OK = probe.returncode == 0
+    return _VIDEOTOOLBOX_OK
 
 
 def _has_videotoolbox() -> bool:
@@ -336,6 +360,7 @@ def render(
     output: Path,
     layout: Layout,
     duration: float | None,
+    no_lyrics: bool = False,
 ) -> None:
     audio = AudioProcessor(str(song_wav), fps=FPS)
     total_frames = int((duration or audio.duration) * FPS)
@@ -346,7 +371,10 @@ def render(
     disc_base = make_disc_base(layout)
     label_layer = make_label_layer(Image.open(cover_path), layout)
     glow_sprite = make_glow_sprite(palette[-1], layout)
-    font, lines, starts = timed_text_overlays(timing, data.get("_lang", "zh"), layout)
+    if no_lyrics:
+        font = lines = starts = None
+    else:
+        font, lines, starts = timed_text_overlays(timing, data.get("_lang", "zh"), layout)
 
     encoder = encode_ffmpeg(output, layout)
     assert encoder.stdin is not None
@@ -399,7 +427,8 @@ def render(
             # vignette + lyrics
             black = Image.new("RGBA", frame.size, (0, 0, 0, 255))
             frame_rgb = Image.composite(frame, black, vignette).convert("RGB")
-            draw_lyric(frame_rgb, font, lines, starts, frame_idx / FPS, layout)
+            if not no_lyrics:
+                draw_lyric(frame_rgb, font, lines, starts, frame_idx / FPS, layout)
 
             encoder.stdin.write(np.asarray(frame_rgb, dtype=np.uint8).tobytes())
             disc_angle = (disc_angle + DEG_PER_FRAME) % 360.0
@@ -417,7 +446,10 @@ def render(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--lyrics-json", required=True, type=Path)
+    parser.add_argument("--lyrics-json", type=Path,
+                        help="Lyrics JSON (required unless --no-lyrics).")
+    parser.add_argument("--no-lyrics", action="store_true",
+                        help="Render without lyric overlay (cover/title come from the wav filename).")
     parser.add_argument("--song-wav", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument(
@@ -434,28 +466,37 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    data = json.loads(args.lyrics_json.read_text(encoding="utf-8"))
-    language = data.get("_lang", "zh")
+    if args.lyrics_json:
+        data = json.loads(args.lyrics_json.read_text(encoding="utf-8"))
+    else:
+        if not args.no_lyrics:
+            parser.error("--lyrics-json is required unless --no-lyrics")
+        # Instrumental / pre-made music: synthesize metadata so the cover
+        # uses the default palette and the wav filename as the title.
+        data = {"title": args.song_wav.stem, "_lang": "zh", "sections": []}
 
     work_dir = args.output.parent
     cover_path = work_dir / "cover.png"
     timing_path = work_dir / "timing.json"
-    if not timing_path.exists():
-        timing = {
-            "language": language,
-            "lines": compute_timing(args.song_wav, data.get("lyrics", ""), language),
-        }
-        timing_path.write_text(
-            json.dumps(timing, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+    if args.no_lyrics:
+        timing = {}
     else:
-        timing = json.loads(timing_path.read_text(encoding="utf-8"))
+        if not timing_path.exists():
+            timing = {
+                "language": data.get("_lang", "zh"),
+                "lines": compute_timing(args.song_wav, data.get("lyrics", ""), data.get("_lang", "zh")),
+            }
+            timing_path.write_text(
+                json.dumps(timing, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        else:
+            timing = json.loads(timing_path.read_text(encoding="utf-8"))
     if not cover_path.exists():
         make_cover(data, cover_path)
 
     render(
         data, timing, cover_path, args.song_wav, args.output,
-        LAYOUTS[args.aspect], args.duration,
+        LAYOUTS[args.aspect], args.duration, no_lyrics=args.no_lyrics,
     )
 
 

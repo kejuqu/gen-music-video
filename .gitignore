@@ -16,5 +16,9 @@ _logs/*
 !_logs/.gitkeep
 20??-??-??/
 
+/outputs-videos/
+/pure-musics/
+
+
 # macOS
 .DS_Store
