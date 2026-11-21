@@ -112,15 +112,71 @@ if __name__ == "__main__":
     unittest.main()
 
 
-from lyric_timing import alignment_coverage, tokens_from_alignment
+from unittest.mock import patch
+
+from lyric_timing import (
+    alignment_coverage,
+    compute_timing_tokens,
+    tokens_from_alignment,
+)
 
 class TokenTests(unittest.TestCase):
-    def test_zh_tokens_split_per_char_with_intra_word_interpolation(self):
+    def test_zh_tokens_split_per_char(self):
         chars = [("我",0.0,0.4),("只",0.4,0.8),("是",0.8,1.2),("一",1.2,1.6),("个",1.6,2.0)]
-        toks = tokens_from_alignment("我是一个", chars)  # 词"我是一个"跨度0~2.0，词内5字线性插值
+        toks = tokens_from_alignment("我只是一个", chars)
         self.assertEqual([t["text"] for t in toks], ["我","只","是","一","个"])
         self.assertAlmostEqual(toks[1]["start"], 0.4)
         self.assertAlmostEqual(toks[1]["end"], 0.8)
+
+    def test_zh_tokens_interpolate_shared_word_span(self):
+        chars = [("我",0.0,2.0),("是",0.0,2.0),("一",0.0,2.0),("个",0.0,2.0)]
+        toks = tokens_from_alignment("我是一个", chars)
+        self.assertEqual([t["text"] for t in toks], ["我","是","一","个"])
+        self.assertAlmostEqual(toks[0]["start"], 0.0)
+        self.assertAlmostEqual(toks[0]["end"], 0.5)
+        self.assertAlmostEqual(toks[1]["start"], 0.5)
+        self.assertAlmostEqual(toks[-1]["end"], 2.0)
+
+    def test_partial_cjk_mapping_keeps_every_source_character(self):
+        chars = [("是",0.8,1.2),("个",1.6,2.0)]
+        toks = tokens_from_alignment("我，是一个", chars, line_start=0.0, line_end=2.0)
+        self.assertEqual([t["text"] for t in toks], ["我","，","是","一","个"])
+        self.assertAlmostEqual(toks[0]["start"], 0.0)
+        self.assertAlmostEqual(toks[0]["end"], 0.4)
+        self.assertAlmostEqual(toks[1]["start"], 0.4)
+        self.assertAlmostEqual(toks[1]["end"], 0.8)
+        self.assertAlmostEqual(toks[2]["start"], 0.8)
+        self.assertAlmostEqual(toks[2]["end"], 1.2)
+        self.assertAlmostEqual(toks[3]["start"], 1.2)
+        self.assertAlmostEqual(toks[3]["end"], 1.6)
+
+    def test_token_times_clamped_to_line_bounds(self):
+        chars = [("我",0.0,4.0),("是",0.0,4.0),("一",0.0,4.0),("个",0.0,4.0)]
+        toks = tokens_from_alignment("我是一个", chars, line_start=1.0, line_end=3.0)
+        self.assertTrue(all(1.0 <= t["start"] <= t["end"] <= 3.0 for t in toks))
+        self.assertAlmostEqual(toks[0]["start"], 1.0)
+        self.assertAlmostEqual(toks[0]["end"], 1.0)
+        self.assertAlmostEqual(toks[-1]["start"], 3.0)
+        self.assertAlmostEqual(toks[-1]["end"], 3.0)
+
+    def test_unmapped_lines_use_final_filled_line_interval(self):
+        segments = [{
+            "start": 1.0,
+            "end": 3.0,
+            "text": "唯一一句",
+            "words": [{"word": "唯一一句", "start": 1.0, "end": 3.0}],
+        }]
+        with patch("lyric_timing.transcribe", return_value=segments), patch(
+            "lyric_timing.song_duration", return_value=7.0
+        ):
+            timed = compute_timing_tokens(Path("offline.wav"), ["唯一一句", "完全无关"], "zh")
+        unmapped = timed[1]
+        self.assertFalse(unmapped["mapped"])
+        self.assertAlmostEqual(unmapped["start"], 3.0)
+        self.assertAlmostEqual(unmapped["end"], 7.0)
+        self.assertEqual([t["start"] for t in unmapped["tokens"]], [3.0,4.0,5.0,6.0])
+        self.assertEqual([t["end"] for t in unmapped["tokens"]], [4.0,5.0,6.0,7.0])
+        self.assertTrue(all(t["end"] > t["start"] for t in unmapped["tokens"]))
 
     def test_en_tokens_split_per_word(self):
         chars = [("j",0.0,0.3),("u",0.0,0.3),("s",0.0,0.3),("t",0.0,0.3),("a",0.4,0.8)]

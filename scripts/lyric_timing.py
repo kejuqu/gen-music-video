@@ -153,12 +153,10 @@ def tokens_from_alignment(
     line_start: float | None = None,
     line_end: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Build per-character CJK or per-word ASCII tokens from mapped chars."""
+    """Build source-line tokens with mapped times and gap-based fallbacks."""
     is_cjk = bool(re.search(r"[㐀-䶿一-鿿豈-﫿]", line))
     if is_cjk:
-        token_texts = [char[0] for char in chars] or [
-            ch for ch in line if not ch.isspace()
-        ]
+        token_texts = [ch for ch in line if not ch.isspace()]
     else:
         token_texts = line.split()
     if not token_texts:
@@ -189,12 +187,6 @@ def tokens_from_alignment(
             )
         run_start = run_end
 
-    if is_cjk and timed_chars:
-        return [
-            {"text": text, "start": start, "end": end}
-            for text, start, end in timed_chars
-        ]
-
     normalized_tokens = [_normalize(token) for token in token_texts]
     normalized_line = "".join(normalized_tokens)
     token_by_char: list[int] = []
@@ -213,23 +205,50 @@ def tokens_from_alignment(
             continue
         for offset in range(i2 - i1):
             if tag == "replace":
-                if offset >= j2 - j1 or normalized_line[i1 + offset] != char_text[j1 + offset]:
+                if (
+                    offset >= j2 - j1
+                    or normalized_line[i1 + offset] != char_text[j1 + offset]
+                ):
                     continue
             lyric_idx = i1 + offset
             if lyric_idx < len(token_by_char):
                 token_chars[token_by_char[lyric_idx]].append(timed_chars[j1 + offset])
 
-    tokens: list[dict[str, Any]] = []
-    span = line_end - line_start
-    for idx, (text, mapped_chars) in enumerate(zip(token_texts, token_chars)):
-        if mapped_chars:
-            start = min(char[1] for char in mapped_chars)
-            end = max(char[2] for char in mapped_chars)
-        else:
-            start = line_start + span * idx / len(token_texts)
-            end = line_start + span * (idx + 1) / len(token_texts)
+    tokens: list[dict[str, Any] | None] = []
+    for text, mapped_chars in zip(token_texts, token_chars):
+        if not mapped_chars:
+            tokens.append(None)
+            continue
+        start = min(char[1] for char in mapped_chars)
+        end = max(char[2] for char in mapped_chars)
+        start = max(line_start, min(line_end, start))
+        end = max(line_start, min(line_end, end))
         tokens.append({"text": text, "start": start, "end": end})
-    return tokens
+
+    # Fill each contiguous unmapped run within the gap between its mapped
+    # neighbors (or the line bounds), preserving every source token.
+    idx = 0
+    while idx < len(tokens):
+        if tokens[idx] is not None:
+            idx += 1
+            continue
+        run_end = idx + 1
+        while run_end < len(tokens) and tokens[run_end] is None:
+            run_end += 1
+        gap_start = tokens[idx - 1]["end"] if idx else line_start
+        gap_end = tokens[run_end]["start"] if run_end < len(tokens) else line_end
+        gap_start = max(line_start, min(line_end, gap_start))
+        gap_end = max(gap_start, min(line_end, gap_end))
+        step = (gap_end - gap_start) / (run_end - idx)
+        for token_idx in range(idx, run_end):
+            offset = token_idx - idx
+            tokens[token_idx] = {
+                "text": token_texts[token_idx],
+                "start": gap_start + step * offset,
+                "end": gap_start + step * (offset + 1),
+            }
+        idx = run_end
+    return [token for token in tokens if token is not None]
 
 
 def alignment_coverage(timed: list[dict[str, Any]]) -> float:
@@ -321,6 +340,7 @@ def compute_timing_tokens(
         return []
     segments = transcribe(song_path, language)
     timed, per_line_chars = _align_lines_with_chars(segments, lines)
+    timed = fill_gaps(timed, song_duration(song_path))
     for idx, item in enumerate(timed):
         coverage = len(per_line_chars[idx]) / max(1, len(_normalize(item["text"])))
         item["mapped"] = coverage >= 0.5
@@ -328,7 +348,7 @@ def compute_timing_tokens(
         item["tokens"] = tokens_from_alignment(
             item["text"], chars, item["start"], item["end"]
         )
-    return fill_gaps(timed, song_duration(song_path))
+    return timed
 
 
 def main() -> None:
