@@ -65,3 +65,24 @@ class LyricZoneTests(unittest.TestCase):
         entries = rp.layout_lyric_zone(rp.LAYOUT, None, long_tokens, None, None)
         cur = [e for e in entries if e.get("karaoke")]
         self.assertLessEqual(len(cur), 2)
+
+    def test_english_tokens_keep_word_spaces_when_wrapped(self):
+        from PIL import ImageFont
+        font = ImageFont.truetype(rp.EN_FONT, 16)
+        tokens = [
+            {"text": "Just", "start": 0.0, "end": 0.3},
+            {"text": "an", "start": 0.3, "end": 0.6},
+            {"text": "ordinary", "start": 0.6, "end": 1.0},
+            {"text": "person", "start": 1.0, "end": 1.4},
+        ]
+        rows = rp._wrap_tokens(tokens, font, 120)
+        self.assertGreaterEqual(len(rows), 2)  # 窄宽度必须折行
+        for row in rows:
+            self.assertTrue(all(" " not in t["text"] for t in row))
+            self.assertGreaterEqual(len(row), 1)
+        # 行内词间空格由渲染时 gap 恢复；此处按 spaced 行重建验证不丢词
+        joined = " ".join(
+            " ".join(t["text"] for t in row) for row in rows
+        )
+        self.assertEqual(joined, "Just an ordinary person")
+

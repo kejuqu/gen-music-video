@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-from render_visualizer import EN_FONT, ZH_FONT, make_cover, wrap_text
+from render_visualizer import EN_FONT, ZH_FONT, _has_cjk, make_cover, wrap_text
 
 
 @dataclass(frozen=True)
@@ -293,18 +293,24 @@ def karaoke_color(
 def _wrap_tokens(
     line_tokens: list[dict], font, max_width: float
 ) -> list[list[dict]]:
-    """Wrap text with render_visualizer and retain each token's timing."""
-    text = "".join(str(token.get("text", "")) for token in line_tokens)
+    """Wrap text with render_visualizer and retain each token's timing.
+
+    Latin word tokens are joined with spaces so wrapping keeps word
+    boundaries (and rendering re-inserts the gaps); CJK character tokens
+    join without separators. Mixed-language lines follow the CJK rule.
+    """
+    texts = [str(token.get("text", "")) for token in line_tokens]
+    separator = "" if any(_has_cjk(text) for text in texts) else " "
+    text = separator.join(texts)
     lines = wrap_text(text, font, max_width)[:2]
     if not lines:
         return []
 
     spans: list[tuple[int, int, dict]] = []
     position = 0
-    for token in line_tokens:
-        token_text = str(token.get("text", ""))
+    for token, token_text in zip(line_tokens, texts):
         spans.append((position, position + len(token_text), token))
-        position += len(token_text)
+        position += len(token_text) + len(separator)
 
     rows: list[list[dict]] = []
     cursor = 0
@@ -348,7 +354,11 @@ def draw_karaoke_line(
 
     for row_index, row in enumerate(rows):
         widths = [draw.textlength(str(token.get("text", "")), font=font) for token in row]
-        x = center[0] - sum(widths) / 2
+        spaced = not any(
+            _has_cjk(str(token.get("text", ""))) for token in row
+        )
+        gap = draw.textlength(" ", font=font) if spaced else 0.0
+        x = center[0] - (sum(widths) + gap * (len(widths) - 1)) / 2
         y = first_y + row_index * line_height
         for token, width in zip(row, widths):
             text = str(token.get("text", ""))
@@ -366,7 +376,7 @@ def draw_karaoke_line(
                     fill=color + (80,), anchor="lm",
                 )
             draw.text((x, y), text, font=font, fill=color + (255,), anchor="lm")
-            x += width
+            x += width + gap
 
 
 def format_time(seconds: float) -> str:
