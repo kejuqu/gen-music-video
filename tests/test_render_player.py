@@ -23,3 +23,45 @@ class LayerTests(unittest.TestCase):
         card = rp.build_card(bg, rp.LAYOUT)
         x0, y0, x1, y1 = rp.LAYOUT.card_box
         self.assertTrue(0 <= x0 < x1 <= 720 and 0 <= y0 < y1 <= 1280)
+
+class SpriteTests(unittest.TestCase):
+    def test_three_note_sprites(self):
+        sprites = rp.note_sprites()
+        self.assertEqual(len(sprites), 3)
+        for s in sprites:
+            self.assertEqual(s.mode, "RGBA")
+            self.assertGreaterEqual(s.height, 48)
+
+    def test_control_icon_keys(self):
+        self.assertEqual(set(rp.control_icons()), {"prev","pause","next","shuffle","repeat"})
+
+class KaraokeTests(unittest.TestCase):
+    def test_color_unsung_is_dim_white(self):
+        c = rp.karaoke_color(0.0, rp.song_palette("x"))
+        self.assertLess(max(c), 200)
+
+    def test_color_sung_is_gold(self):
+        c = rp.karaoke_color(1.0, rp.song_palette("x"))
+        self.assertGreater(c[0], 220)   # 红分量高
+        self.assertGreater(c[1], 170)   # 绿分量高
+        self.assertLess(c[2], 140)      # 蓝分量低
+
+    def test_color_midpoint_between(self):
+        mid = rp.karaoke_color(0.5, rp.song_palette("x"))
+        self.assertLess(mid[0], rp.karaoke_color(1.0, rp.song_palette("x"))[0])
+
+    def test_format_time(self):
+        self.assertEqual(rp.format_time(135.0), "2:15")
+        self.assertEqual(rp.format_time(8.0), "0:08")
+
+class LyricZoneTests(unittest.TestCase):
+    def test_zone_entries_inside_canvas(self):
+        entries = rp.layout_lyric_zone(rp.LAYOUT, "上一句", [{"text":"a","start":0,"end":1}], "下一句", None)
+        for e in entries:
+            self.assertTrue(0 <= e["y"] <= 1280)
+
+    def test_long_line_wraps_to_two(self):
+        long_tokens = [{"text": ch, "start": i*0.1, "end": (i+1)*0.1} for i, ch in enumerate("我"*60)]
+        entries = rp.layout_lyric_zone(rp.LAYOUT, None, long_tokens, None, None)
+        cur = [e for e in entries if e.get("karaoke")]
+        self.assertLessEqual(len(cur), 2)
