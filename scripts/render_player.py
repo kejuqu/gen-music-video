@@ -724,9 +724,7 @@ def render(
 
             # three-line lyric zone with karaoke highlighting
             idx = _line_at(lines, starts, t)
-            prev_line = lines[idx - 1]["text"] if idx is not None and idx > 0 else (
-                lines[-1]["text"] if idx is not None and idx == 0 else None
-            )
+            prev_line = lines[idx - 1]["text"] if idx is not None and idx > 0 else None
             next_line = (
                 lines[idx + 1]["text"]
                 if idx is not None and idx + 1 < len(lines)

@@ -101,6 +101,22 @@ class ParticleTests(unittest.TestCase):
         y_high = p2.update(1.0)[0][2]
         self.assertLess(y_high, y_low)  # 高能时升得更多(y 向上减小)
 
+class LineAtTests(unittest.TestCase):
+    def test_first_line_active(self):
+        lines = [{"start": 1.0, "end": 3.0, "text": "a"}, {"start": 4.0, "end": 6.0, "text": "b"}]
+        self.assertEqual(rp._line_at(lines, [l["start"] for l in lines], 2.0), 0)
+
+    def test_gap_between_lines_is_none(self):
+        lines = [{"start": 1.0, "end": 3.0, "text": "a"}, {"start": 4.0, "end": 6.0, "text": "b"}]
+        self.assertIsNone(rp._line_at(lines, [l["start"] for l in lines], 3.5))
+
+    def test_before_first_line_is_none(self):
+        lines = [{"start": 1.0, "end": 3.0, "text": "a"}]
+        self.assertIsNone(rp._line_at(lines, [1.0], 0.5))
+
+    def test_empty_lines_is_none(self):
+        self.assertIsNone(rp._line_at([], [], 1.0))
+
 class CacheTests(unittest.TestCase):
     def _touch(self, path, mtime):
         path.write_text("x"); import os; os.utime(path, (mtime, mtime))
