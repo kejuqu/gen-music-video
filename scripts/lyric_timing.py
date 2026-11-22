@@ -60,6 +60,17 @@ def _flatten_words(segments: list[dict[str, Any]]) -> list[tuple[str, float, flo
     return chars
 
 
+def _align_lines_with_chars(
+    segments: list[dict[str, Any]], lines: list[str]
+) -> tuple[list[dict[str, Any]], list[list[tuple[str, float, float]]]]:
+    chars = _flatten_words(segments)
+    if chars:
+        aligned = _align_by_chars(chars, lines)
+        if aligned is not None:
+            return aligned
+    return _align_by_segments(segments, lines), [[] for _ in lines]
+
+
 def align_lines(
     segments: list[dict[str, Any]], lines: list[str]
 ) -> list[dict[str, Any]]:
@@ -72,17 +83,14 @@ def align_lines(
     characters. Lines with too few mapped characters fall back to the
     segment-level greedy matcher so sparse transcripts still work.
     """
-    chars = _flatten_words(segments)
-    if chars:
-        timed = _align_by_chars(chars, lines)
-        if timed is not None:
-            return timed
-    return _align_by_segments(segments, lines)
+    return _align_lines_with_chars(segments, lines)[0]
 
 
 def _align_by_chars(
     chars: list[tuple[str, float, float]], lines: list[str]
-) -> list[dict[str, Any]] | None:
+) -> tuple[
+    list[dict[str, Any]], list[list[tuple[str, float, float]]]
+] | None:
     transcript = "".join(ch for ch, _, _ in chars)
     lyric = "".join(_normalize(line) for line in lines)
     if not lyric:
@@ -135,7 +143,119 @@ def _align_by_chars(
             end = previous_end
         timed.append({"start": start, "end": end, "text": line})
         previous_end = max(previous_end, end)
-    return timed if any_mapped else None
+    per_line_chars = [[chars[i] for i in indices] for indices in mapped]
+    return (timed, per_line_chars) if any_mapped else None
+
+
+def tokens_from_alignment(
+    line: str,
+    chars: list[tuple[str, float, float]],
+    line_start: float | None = None,
+    line_end: float | None = None,
+) -> list[dict[str, Any]]:
+    """Build source-line tokens with mapped times and gap-based fallbacks."""
+    is_cjk = bool(re.search(r"[㐀-䶿一-鿿豈-﫿]", line))
+    if is_cjk:
+        token_texts = [ch for ch in line if not ch.isspace()]
+    else:
+        token_texts = line.split()
+    if not token_texts:
+        return []
+
+    if line_start is None:
+        line_start = min((char[1] for char in chars), default=0.0)
+    if line_end is None:
+        line_end = max((char[2] for char in chars), default=line_start)
+
+    # Whisper assigns one time span to every character in a word. Interpolate
+    # within each such run so CJK characters receive distinct token times.
+    timed_chars: list[tuple[str, float, float]] = []
+    run_start = 0
+    while run_start < len(chars):
+        run_end = run_start + 1
+        while (
+            run_end < len(chars)
+            and chars[run_end][1:] == chars[run_start][1:]
+        ):
+            run_end += 1
+        start, end = chars[run_start][1:]
+        step = (end - start) / (run_end - run_start)
+        for idx in range(run_start, run_end):
+            offset = idx - run_start
+            timed_chars.append(
+                (chars[idx][0], start + step * offset, start + step * (offset + 1))
+            )
+        run_start = run_end
+
+    normalized_tokens = [_normalize(token) for token in token_texts]
+    normalized_line = "".join(normalized_tokens)
+    token_by_char: list[int] = []
+    for token_idx, token in enumerate(normalized_tokens):
+        token_by_char.extend([token_idx] * len(token))
+
+    # Mapped chars are an ordered subset of the normalized lyric line. Recover
+    # their lyric positions so partially aligned lines still map to tokens.
+    char_text = "".join(char[0] for char in timed_chars)
+    matcher = SequenceMatcher(None, normalized_line, char_text, autojunk=False)
+    token_chars: list[list[tuple[str, float, float]]] = [
+        [] for _ in token_texts
+    ]
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "delete":
+            continue
+        for offset in range(i2 - i1):
+            if tag == "replace":
+                if (
+                    offset >= j2 - j1
+                    or normalized_line[i1 + offset] != char_text[j1 + offset]
+                ):
+                    continue
+            lyric_idx = i1 + offset
+            if lyric_idx < len(token_by_char):
+                token_chars[token_by_char[lyric_idx]].append(timed_chars[j1 + offset])
+
+    tokens: list[dict[str, Any] | None] = []
+    for text, mapped_chars in zip(token_texts, token_chars):
+        if not mapped_chars:
+            tokens.append(None)
+            continue
+        start = min(char[1] for char in mapped_chars)
+        end = max(char[2] for char in mapped_chars)
+        start = max(line_start, min(line_end, start))
+        end = max(line_start, min(line_end, end))
+        tokens.append({"text": text, "start": start, "end": end})
+
+    # Fill each contiguous unmapped run within the gap between its mapped
+    # neighbors (or the line bounds), preserving every source token.
+    idx = 0
+    while idx < len(tokens):
+        if tokens[idx] is not None:
+            idx += 1
+            continue
+        run_end = idx + 1
+        while run_end < len(tokens) and tokens[run_end] is None:
+            run_end += 1
+        gap_start = tokens[idx - 1]["end"] if idx else line_start
+        gap_end = tokens[run_end]["start"] if run_end < len(tokens) else line_end
+        gap_start = max(line_start, min(line_end, gap_start))
+        gap_end = max(gap_start, min(line_end, gap_end))
+        step = (gap_end - gap_start) / (run_end - idx)
+        for token_idx in range(idx, run_end):
+            offset = token_idx - idx
+            tokens[token_idx] = {
+                "text": token_texts[token_idx],
+                "start": gap_start + step * offset,
+                "end": gap_start + step * (offset + 1),
+            }
+        idx = run_end
+    return [token for token in tokens if token is not None]
+
+
+def alignment_coverage(timed: list[dict[str, Any]]) -> float:
+    """Return the fraction of lines with at least 50% character alignment."""
+    if not timed:
+        return 0.0
+    return sum(bool(item.get("mapped", False)) for item in timed) / len(timed)
 
 
 def _align_by_segments(
@@ -210,6 +330,25 @@ def compute_timing(
         return []
     segments = transcribe(song_path, language)
     return fill_gaps(align_lines(segments, lines), song_duration(song_path))
+
+
+def compute_timing_tokens(
+    song_path: Path, lines: list[str], language: str
+) -> list[dict[str, Any]]:
+    """Align parsed lyric lines and attach token-level display times."""
+    if not lines:
+        return []
+    segments = transcribe(song_path, language)
+    timed, per_line_chars = _align_lines_with_chars(segments, lines)
+    timed = fill_gaps(timed, song_duration(song_path))
+    for idx, item in enumerate(timed):
+        coverage = len(per_line_chars[idx]) / max(1, len(_normalize(item["text"])))
+        item["mapped"] = coverage >= 0.5
+        chars = per_line_chars[idx] if item["mapped"] else []
+        item["tokens"] = tokens_from_alignment(
+            item["text"], chars, item["start"], item["end"]
+        )
+    return timed
 
 
 def main() -> None:
