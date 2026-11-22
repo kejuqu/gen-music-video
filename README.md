@@ -83,6 +83,8 @@ ffmpeg 合流（视频流直接复制 + AAC 192k 音轨）
 │   ├── generate_music.py        # YoVoice 歌曲生成与音频下载（--duration 可改时长）
 │   ├── lyric_timing.py          # mlx-whisper 歌词时间轴（单词级对齐）
 │   ├── render_visualizer.py     # 视频渲染：黑胶 + 彩虹频谱 + 歌词（--aspect 16:9/9:16）
+│   ├── render_player.py         # 竖版播放器风格渲染：磨砂卡片 + 环形频谱 + 逐字 karaoke + 音符
+│   ├── voice_videos.sh          # voice-musics/ 外部音乐批处理（播放器风格成片）
 │   ├── video_filename.py        # 最终文件名安全化
 │   ├── install_launchd.sh       # 渲染并加载 launchd 配置
 │   ├── audio_analysis.py        # 【旧流程】PCM 音频读取及逐帧 FFT 分析
@@ -189,6 +191,44 @@ outputs-videos/<歌名>.wav   ← 原 wav 一并归档
 - 成功后 wav 与两个 mp4 移入 `outputs-videos/`；已存在的同名成片会被覆盖。
 - 可用环境变量覆盖路径：`PURE_MUSICS_DIR`、`OUTPUT_VIDEOS_DIR`、`PURE_WORK_DIR`、`PYTHON`。
 - 日志写入 `_logs/pure-videos-<日期>.log`。
+
+## 外部音乐播放器风格成片（voice-musics）
+
+将外部音乐按 `voice-musics/<歌名>/` 组织（每首一个 `*.wav` + 一个 `lyrics.txt`），执行：
+
+```bash
+make voice-videos         # 等价于 bash scripts/voice_videos.sh
+```
+
+脚本会为每个歌曲文件夹串行完成以下步骤：
+
+```text
+voice-musics/<歌名>/{任意名}.wav + lyrics.txt
+        │
+        ▼
+render_player.py（9:16 720×1280 播放器风格画面）
+  ├─ 歌词解析：剔除 [verse 1] 等段落标记与整行括号注释
+  ├─ mlx-whisper 逐字对齐 → .voice-work/<歌名>/timing.json（缓存）
+  ├─ 对齐覆盖率 < 0.5 → 该首判 FAILED（跳过，不产出乱字幕成片）
+  ├─ 歌名播种确定性配色（每首歌背景色不同，重跑一致）
+  └─ 逐帧合成：磨砂卡片 + 黑胶唱片 + 环形频谱 + 漂浮音符
+     + 真实进度条 + 逐字 karaoke 歌词（上一句/当前句/下一句）
+        │
+        ▼
+ffmpeg 合流（视频流复制 + AAC 192k 音轨）
+        │
+        ▼
+outputs-videos/<歌名>_player_9x16.mp4   ← 源文件原地保留
+```
+
+要点：
+
+- 歌手名默认「一千柯橘」（`ARTIST` 环境变量可覆盖），歌名取文件夹名。
+- **只出 9:16 竖版**（720×1280、30 fps、h264），适合手机端。
+- `timing.json` 缓存同时对比 wav 与 lyrics.txt 的修改时间：替换音频或改歌词后自动重新对齐；也可删除 `.voice-work/<歌名>/` 强制重算。
+- 单首失败不阻塞其他歌曲，最终退出码汇总失败；日志写入 `_logs/voice-videos-<日期>.log`。
+- 依赖与主流程相同（ffmpeg、visgen、mlx-whisper），不调用 Ollama / YoVoice。
+- 可用环境变量覆盖路径：`VOICE_MUSICS_DIR`、`OUTPUT_VIDEOS_DIR`、`VOICE_WORK_DIR`、`PYTHON`、`ARTIST`。
 
 ## 环境要求
 
