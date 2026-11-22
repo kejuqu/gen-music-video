@@ -194,10 +194,22 @@ outputs-videos/<歌名>.wav   ← 原 wav 一并归档
 
 ## 外部音乐播放器风格成片（voice-musics）
 
-将外部音乐按 `voice-musics/<歌名>/` 组织（每首一个 `*.wav` + 一个 `lyrics.txt`），执行：
+**把 voice-musics 下的音乐和歌词变成视频，只需两步：**
+
+1. 每首歌一个文件夹 `voice-musics/<歌名>/`，里面放**任意文件名的一首 `*.wav`** 和 **`lyrics.txt`**（纯文本歌词，可含 `[verse 1]` 段落标记与整行括号注释，会自动剔除）。
+2. 运行：
 
 ```bash
 make voice-videos         # 等价于 bash scripts/voice_videos.sh
+```
+
+跑完到 `outputs-videos/` 取成片 `<歌名>_player_9x16.mp4`（9:16 720×1280 竖版，源文件原地保留）。单首快速试渲（只渲前 15 秒看效果）：
+
+```bash
+python scripts/render_player.py \
+  --song-wav "voice-musics/<歌名>/xxx.wav" \
+  --lyrics-txt "voice-musics/<歌名>/lyrics.txt" \
+  --output /tmp/smoke.mp4 --duration 15
 ```
 
 脚本会为每个歌曲文件夹串行完成以下步骤：
