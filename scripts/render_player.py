@@ -1,16 +1,50 @@
-"""Theme palette and static layers for the vertical music-player renderer."""
+"""Vertical (9:16) music-player style renderer for external songs.
+
+Frosted-glass player card over a deterministic per-song harmonic gradient:
+rotating vinyl with a generated cover label, a palette-colored circular
+spectrum, floating note particles, a real progress bar, and word-level
+karaoke lyrics timed by mlx-whisper alignment.
+
+CLI:
+  python scripts/render_player.py --song-wav song.wav --lyrics-txt lyrics.txt \
+      --title "歌名" --artist "一千柯橘" --output video.mp4 [--duration 15]
+"""
 
 from __future__ import annotations
 
+import argparse
 import colorsys
 import hashlib
+import json
+import math
+import random
+import time
+from bisect import bisect_right
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-from render_visualizer import EN_FONT, ZH_FONT, _has_cjk, make_cover, wrap_text
+from render_visualizer import (
+    EN_FONT,
+    ZH_FONT,
+    _has_cjk,
+    encode_ffmpeg,
+    make_cover,
+    perceptual_gain,
+    wrap_text,
+)
+from visgen.audio import AudioProcessor
+
+from lyric_timing import alignment_coverage, compute_timing_tokens
+from voice_lyrics import detect_language, parse_voice_lyrics
+
+FPS = 30
+RPM = 33.33
+DEG_PER_FRAME = RPM * 360.0 / 60.0 / FPS
+DEFAULT_ARTIST = "一千柯橘"
+COVER_THRESHOLD = 0.5
 
 
 @dataclass(frozen=True)
@@ -458,3 +492,344 @@ def draw_progress(draw, layout: Layout, t: float, duration: float) -> None:
               fill=(255, 255, 255, 180), anchor="rm")
     draw.text((x1 + 18, y), format_time(duration), font=font,
               fill=(255, 255, 255, 180), anchor="lm")
+
+
+class NoteParticles:
+    """Deterministic rising-note particle field, seeded by the song title.
+
+    Twelve slots loop independently: each rises from the bottom edge with a
+    per-frame step scaled by audio energy, sways horizontally, fades in and
+    out, and respawns at the bottom when it leaves the top.
+    """
+
+    SLOT_COUNT = 12
+    LIFE_FRAMES = 240  # ~8 s at 30 fps for one bottom-to-top traversal
+
+    def __init__(self, seed_text: str, sprites: list, layout: Layout) -> None:
+        self._rng = random.Random(int(hashlib.sha1(seed_text.encode()).hexdigest(), 16))
+        self._sprites = sprites
+        self._layout = layout
+        self._particles = [self._spawn() for _ in range(self.SLOT_COUNT)]
+
+    def _spawn(self) -> dict:
+        layout = self._layout
+        return {
+            "sprite": self._rng.randrange(len(self._sprites)),
+            "base_x": self._rng.uniform(0.04, 0.96) * layout.width,
+            "phase": self._rng.uniform(0.0, 2.0 * math.pi),
+            "sway": self._rng.uniform(10.0, 34.0),
+            "scale": self._rng.uniform(0.5, 1.0),
+            # staggered so the column always has notes at every height
+            "progress": self._rng.uniform(0.0, 1.0),
+        }
+
+    def update(self, energy: float) -> list:
+        """Advance one frame; return [(sprite, x, y, alpha), ...]."""
+        layout = self._layout
+        step = (0.6 + 0.8 * max(0.0, min(1.0, energy))) / self.LIFE_FRAMES
+        rise = layout.height + 96
+        out = []
+        for particle in self._particles:
+            particle["progress"] += step
+            if particle["progress"] >= 1.0:
+                particle.update(self._spawn())
+                particle["progress"] = step
+            progress = particle["progress"]
+            sprite = self._sprites[particle["sprite"]]
+            x = particle["base_x"] + particle["sway"] * math.sin(
+                particle["phase"] + progress * 2.4 * math.pi
+            )
+            y = layout.height + 48 - rise * progress
+            fade = math.sin(min(progress, 1.0) * math.pi)
+            alpha = int(50 + 70 * fade)
+            out.append((sprite, x, y, alpha))
+        return out
+
+
+def timing_cache_valid(
+    timing_path: Path, lyrics_txt_path: Path, wav_path: Path
+) -> bool:
+    """True iff a cached timing.json exists and is newer than both sources."""
+    timing_path = Path(timing_path)
+    if not timing_path.exists():
+        return False
+    timing_mtime = timing_path.stat().st_mtime
+    return timing_mtime > Path(lyrics_txt_path).stat().st_mtime and (
+        timing_mtime > Path(wav_path).stat().st_mtime
+    )
+
+
+def _line_at(lines: list[dict], starts: list[float], t: float) -> int | None:
+    """Index of the lyric line active at time t, or None during gaps."""
+    if not lines:
+        return None
+    idx = bisect_right(starts, t) - 1
+    if idx < 0 or t > lines[idx]["end"]:
+        return None
+    return idx
+
+
+def render(
+    song_wav: Path,
+    output: Path,
+    title: str,
+    artist: str,
+    timing: dict,
+    palette: list[tuple[int, int, int]],
+    layout: Layout,
+    duration: float | None = None,
+) -> None:
+    """Render the silent player-style video; audio is merged later by ffmpeg."""
+    audio = AudioProcessor(str(song_wav), fps=FPS)
+    total_frames = int((duration or audio.duration) * FPS)
+    song_duration = total_frames / FPS
+
+    cover_path = Path(output).parent / "cover.png"
+    background = build_background(palette, layout).convert("RGBA")
+    card = build_card(background.convert("RGB"), layout)
+    disc_base = build_disc_base(layout)
+    label_layer = build_label_layer(Image.open(cover_path), layout)
+    sprites = note_sprites()
+    icons = control_icons()
+    particles = NoteParticles(title, sprites, layout)
+
+    title_font = ImageFont.truetype(
+        ZH_FONT if _has_cjk(title) else EN_FONT, 34
+    )
+    artist_font = ImageFont.truetype(
+        ZH_FONT if _has_cjk(artist) else EN_FONT, 20
+    )
+    small_font = ImageFont.truetype(ZH_FONT, 22)
+    current_font = ImageFont.truetype(ZH_FONT, 34)
+
+    lines = timing.get("lines", [])
+    starts = [line["start"] for line in lines]
+
+    # static glow sprite behind the disc (breathing with energy)
+    glow_sprite = Image.new("RGBA", (layout.width, layout.height), (0, 0, 0, 0))
+    gx0, gy0, gx1, gy1 = layout.cover_box
+    gc_x, gc_y = (gx0 + gx1) // 2, (gy0 + gy1) // 2
+    glow_r = int(layout.disc_radius * 1.7)
+    ImageDraw.Draw(glow_sprite).ellipse(
+        (gc_x - glow_r, gc_y - glow_r, gc_x + glow_r, gc_y + glow_r),
+        fill=palette[0] + (70,),
+    )
+    glow_sprite = glow_sprite.filter(ImageFilter.GaussianBlur(70))
+
+    encoder = encode_ffmpeg(Path(output), layout)
+    assert encoder.stdin is not None
+
+    prev_bars = np.zeros(layout.bar_count)
+    disc_angle = 0.0
+    disc_cx, disc_cy = gc_x, gc_y
+    zx0, zy0, zx1, zy1 = layout.lyric_zone
+    icon_size = 34
+    controls = [
+        (icons["prev"], layout.width / 2 - 120),
+        (icons["pause"], layout.width / 2 - 17),
+        (icons["next"], layout.width / 2 + 86),
+        (icons["shuffle"], layout.width / 2 + 180),
+        (icons["repeat"], layout.width / 2 - 214),
+    ]
+    controls_y = layout.card_box[3] - 44
+
+    try:
+        for frame_idx in range(total_frames):
+            bars = perceptual_gain(
+                audio.get_bar_values(
+                    frame_idx, layout.bar_count, prev_bars, 0.45
+                )
+            )
+            prev_bars = bars
+            energy = float(np.mean(bars))
+            t = frame_idx / FPS
+
+            frame = background.copy()
+
+            glow = glow_sprite.copy()
+            glow.putalpha(
+                glow_sprite.getchannel("A").point(
+                    lambda a: int(a * (0.3 + 1.4 * energy))
+                )
+            )
+            frame = Image.alpha_composite(frame, glow)
+
+            # floating notes rise behind the card and lyrics stay on top
+            for sprite, x, y, alpha in particles.update(energy):
+                scaled = sprite.resize(
+                    (int(64 * 0.7), int(64 * 0.7)), Image.LANCZOS
+                )
+                faded = scaled.copy()
+                faded.putalpha(
+                    scaled.getchannel("A").point(lambda a: int(a * alpha / 255))
+                )
+                frame.alpha_composite(faded, (int(x - 22), int(y - 22)))
+
+            frame = Image.alpha_composite(frame, card)
+
+            # vinyl: static body + rotating label/sheen
+            disc = disc_base.copy()
+            rotated = label_layer.rotate(
+                disc_angle,
+                resample=Image.BICUBIC,
+                center=(layout.disc_radius, layout.disc_radius),
+            )
+            disc = Image.alpha_composite(disc, rotated)
+            frame.alpha_composite(
+                disc, (disc_cx - layout.disc_radius, disc_cy - layout.disc_radius)
+            )
+
+            draw = ImageDraw.Draw(frame, "RGBA")
+
+            # palette-colored circular spectrum radiating from the disc edge
+            inner = layout.disc_radius + 14
+            for i in range(layout.bar_count):
+                angle = (i / layout.bar_count) * 2 * math.pi - math.pi / 2
+                length = layout.bar_max_len * bars[i]
+                if length < 2:
+                    continue
+                color = palette[i % len(palette)]
+                cos_a, sin_a = math.cos(angle), math.sin(angle)
+                draw.line(
+                    [
+                        (disc_cx + cos_a * inner, disc_cy + sin_a * inner),
+                        (
+                            disc_cx + cos_a * (inner + length),
+                            disc_cy + sin_a * (inner + length),
+                        ),
+                    ],
+                    fill=color + (int(120 + 135 * bars[i]),),
+                    width=3,
+                )
+
+            # card header: title + artist
+            draw.text(
+                (layout.width / 2, layout.card_box[1] + 54),
+                title, font=title_font, fill=(255, 255, 255, 255), anchor="mm",
+            )
+            draw.text(
+                (layout.width / 2, layout.card_box[1] + 92),
+                artist, font=artist_font, fill=(255, 255, 255, 165), anchor="mm",
+            )
+
+            # transport controls
+            for icon, cx in controls:
+                sprite = icon.resize((icon_size, icon_size), Image.LANCZOS)
+                frame.alpha_composite(
+                    sprite, (int(cx - icon_size / 2), int(controls_y - icon_size / 2))
+                )
+            draw = ImageDraw.Draw(frame, "RGBA")
+
+            draw_progress(draw, layout, t, song_duration)
+
+            # three-line lyric zone with karaoke highlighting
+            idx = _line_at(lines, starts, t)
+            prev_line = lines[idx - 1]["text"] if idx is not None and idx > 0 else (
+                lines[-1]["text"] if idx is not None and idx == 0 else None
+            )
+            next_line = (
+                lines[idx + 1]["text"]
+                if idx is not None and idx + 1 < len(lines)
+                else None
+            )
+            entries = layout_lyric_zone(
+                layout,
+                prev_line,
+                lines[idx]["tokens"] if idx is not None else [],
+                next_line,
+                (small_font, current_font),
+            )
+            for entry in entries:
+                if entry.get("karaoke"):
+                    draw_karaoke_line(
+                        draw,
+                        entry["tokens"],
+                        current_font,
+                        (layout.width / 2, entry["y"]),
+                        t,
+                        palette,
+                        zx1 - zx0,
+                    )
+                else:
+                    font = small_font
+                    draw.text(
+                        (layout.width / 2, entry["y"]),
+                        entry["text"],
+                        font=font,
+                        fill=(255, 255, 255, entry["alpha"]),
+                        anchor="mm",
+                    )
+
+            encoder.stdin.write(
+                np.asarray(frame.convert("RGB"), dtype=np.uint8).tobytes()
+            )
+            disc_angle = (disc_angle + DEG_PER_FRAME) % 360.0
+
+            if frame_idx % 300 == 0:
+                print(
+                    f"[player] Frame {frame_idx}/{total_frames}", flush=True
+                )
+    finally:
+        if encoder.stdin:
+            encoder.stdin.close()
+        encoder.wait()
+    if encoder.returncode != 0:
+        raise SystemExit(f"ffmpeg encoding failed (exit={encoder.returncode})")
+    print(f"[player] video -> {output}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--song-wav", required=True, type=Path)
+    parser.add_argument("--lyrics-txt", required=True, type=Path)
+    parser.add_argument("--title", default=None,
+                        help="Song title (default: wav parent folder name).")
+    parser.add_argument("--artist", default=DEFAULT_ARTIST)
+    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--duration", type=float, default=None,
+                        help="Cap the rendered video at this many seconds.")
+    parser.add_argument("--timing", type=Path, default=None,
+                        help="timing.json cache path (default: beside output).")
+    args = parser.parse_args()
+
+    title = args.title or args.song_wav.parent.name
+    language = detect_language(parse_voice_lyrics(args.lyrics_txt.read_text(encoding="utf-8")))
+
+    timing_path = args.timing or (Path(args.output).parent / "timing.json")
+    if timing_cache_valid(timing_path, args.lyrics_txt, args.song_wav):
+        timing = json.loads(timing_path.read_text(encoding="utf-8"))
+        print(f"[player] reused timing cache -> {timing_path}")
+    else:
+        lines = parse_voice_lyrics(args.lyrics_txt.read_text(encoding="utf-8"))
+        timed = compute_timing_tokens(args.song_wav, lines, language)
+        coverage = alignment_coverage(timed)
+        if coverage < COVER_THRESHOLD:
+            raise SystemExit(
+                f"alignment coverage below threshold: {coverage:.2f} < {COVER_THRESHOLD}"
+            )
+        timing = {"language": language, "lines": timed}
+        timing_path.parent.mkdir(parents=True, exist_ok=True)
+        timing_path.write_text(
+            json.dumps(timing, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(f"[player] timing -> {timing_path} (coverage={coverage:.2f})")
+
+    palette = song_palette(title)
+    cover_path = Path(args.output).parent / "cover.png"
+    if not cover_path.exists():
+        cover_for(title, language, palette, cover_path)
+
+    render(
+        args.song_wav,
+        args.output,
+        title,
+        args.artist,
+        timing,
+        palette,
+        LAYOUT,
+        duration=args.duration,
+    )
+
+
+if __name__ == "__main__":
+    main()

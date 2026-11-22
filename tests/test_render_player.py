@@ -1,4 +1,4 @@
-import sys, unittest
+import sys, tempfile, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import render_player as rp
@@ -85,4 +85,37 @@ class LyricZoneTests(unittest.TestCase):
             " ".join(t["text"] for t in row) for row in rows
         )
         self.assertEqual(joined, "Just an ordinary person")
+
+class ParticleTests(unittest.TestCase):
+    def test_deterministic_sequence(self):
+        a = rp.NoteParticles("平凡底片", rp.note_sprites(), rp.LAYOUT)
+        b = rp.NoteParticles("平凡底片", rp.note_sprites(), rp.LAYOUT)
+        sa, sb = a.update(0.5), b.update(0.5)
+        self.assertEqual([(s[1], s[2], s[3]) for s in sa], [(s[1], s[2], s[3]) for s in sb])
+        self.assertTrue(0 < len(sa) <= 14)
+
+    def test_energy_speeds_rise(self):
+        p = rp.NoteParticles("平凡底片", rp.note_sprites(), rp.LAYOUT)
+        p.update(0.0); y_low = p.update(0.0)[0][2]
+        p2 = rp.NoteParticles("平凡底片", rp.note_sprites(), rp.LAYOUT)
+        y_high = p2.update(1.0)[0][2]
+        self.assertLess(y_high, y_low)  # 高能时升得更多(y 向上减小)
+
+class CacheTests(unittest.TestCase):
+    def _touch(self, path, mtime):
+        path.write_text("x"); import os; os.utime(path, (mtime, mtime))
+
+    def test_invalid_when_wav_newer(self):
+        import tempfile, time
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d); tp = d/"timing.json"; lw = d/"lyrics.txt"; wv = d/"a.wav"
+            now = time.time()
+            self._touch(lw, now-30); self._touch(wv, now-20); self._touch(tp, now-10)
+            self.assertTrue(rp.timing_cache_valid(tp, lw, wv))
+            self._touch(wv, now)          # wav 更新
+            self.assertFalse(rp.timing_cache_valid(tp, lw, wv))
+
+    def test_invalid_when_missing(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertFalse(rp.timing_cache_valid(Path(d)/"t.json", Path(d)/"l", Path(d)/"w"))
 
